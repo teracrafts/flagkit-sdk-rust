@@ -54,7 +54,6 @@ use flagkit::{FlagKitOptions, FlagKit};
 use std::time::Duration;
 
 let options = FlagKitOptions::builder("sdk_your_api_key")
-    .base_url("https://custom.api.flagkit.dev/api/v1")
     .polling_interval(Duration::from_secs(60))
     .cache_ttl(Duration::from_secs(600))
     .max_cache_size(500)
@@ -248,7 +247,6 @@ for handle in handles {
 | Property | Default | Description |
 |----------|---------|-------------|
 | `api_key` | (required) | API key for authentication |
-| `base_url` | `https://api.flagkit.dev/api/v1` | API base URL |
 | `polling_interval` | 30s | Polling interval |
 | `cache_ttl` | 5min | Cache time-to-live |
 | `max_cache_size` | 1000 | Maximum cache entries |

@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use url::Url;
-
 use crate::error::{ErrorCode, FlagKitError, Result};
 
-pub const DEFAULT_BASE_URL: &str = "https://api.flagkit.dev/api/v1";
 pub const DEFAULT_POLLING_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
 pub const DEFAULT_MAX_CACHE_SIZE: usize = 1000;
@@ -19,7 +16,6 @@ pub const DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT: Duration = Duration::from_secs(
 #[derive(Debug, Clone)]
 pub struct FlagKitOptions {
     pub api_key: String,
-    pub base_url: String,
     pub polling_interval: Duration,
     pub cache_ttl: Duration,
     pub max_cache_size: usize,
@@ -38,7 +34,6 @@ impl FlagKitOptions {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: DEFAULT_BASE_URL.to_string(),
             polling_interval: DEFAULT_POLLING_INTERVAL,
             cache_ttl: DEFAULT_CACHE_TTL,
             max_cache_size: DEFAULT_MAX_CACHE_SIZE,
@@ -70,13 +65,6 @@ impl FlagKitOptions {
             ));
         }
 
-        if Url::parse(&self.base_url).is_err() {
-            return Err(FlagKitError::config_error(
-                ErrorCode::ConfigInvalidBaseUrl,
-                "Invalid base URL",
-            ));
-        }
-
         if self.polling_interval.is_zero() {
             return Err(FlagKitError::config_error(
                 ErrorCode::ConfigInvalidPollingInterval,
@@ -101,7 +89,6 @@ impl FlagKitOptions {
 
 pub struct FlagKitOptionsBuilder {
     api_key: String,
-    base_url: String,
     polling_interval: Duration,
     cache_ttl: Duration,
     max_cache_size: usize,
@@ -120,7 +107,6 @@ impl FlagKitOptionsBuilder {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             api_key: api_key.into(),
-            base_url: DEFAULT_BASE_URL.to_string(),
             polling_interval: DEFAULT_POLLING_INTERVAL,
             cache_ttl: DEFAULT_CACHE_TTL,
             max_cache_size: DEFAULT_MAX_CACHE_SIZE,
@@ -134,11 +120,6 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
         }
-    }
-
-    pub fn base_url(mut self, url: impl Into<String>) -> Self {
-        self.base_url = url.into();
-        self
     }
 
     pub fn polling_interval(mut self, interval: Duration) -> Self {
@@ -204,7 +185,6 @@ impl FlagKitOptionsBuilder {
     pub fn build(self) -> FlagKitOptions {
         FlagKitOptions {
             api_key: self.api_key,
-            base_url: self.base_url,
             polling_interval: self.polling_interval,
             cache_ttl: self.cache_ttl,
             max_cache_size: self.max_cache_size,

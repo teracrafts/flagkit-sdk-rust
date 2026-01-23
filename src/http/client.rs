@@ -6,6 +6,8 @@ use super::circuit_breaker::CircuitBreaker;
 use crate::core::FlagKitOptions;
 use crate::error::{ErrorCode, FlagKitError, Result};
 
+const DEFAULT_BASE_URL: &str = "https://api.flagkit.dev/api/v1";
+
 pub struct HttpClient {
     client: Client,
     circuit_breaker: CircuitBreaker,
@@ -44,7 +46,7 @@ impl HttpClient {
     }
 
     async fn do_get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{}{}", self.options.base_url, path);
+        let url = format!("{}{}", DEFAULT_BASE_URL, path);
 
         let response = self
             .client
@@ -60,7 +62,7 @@ impl HttpClient {
     }
 
     async fn do_post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
-        let url = format!("{}{}", self.options.base_url, path);
+        let url = format!("{}{}", DEFAULT_BASE_URL, path);
 
         let response = self
             .client

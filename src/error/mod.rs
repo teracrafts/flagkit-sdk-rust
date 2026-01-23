@@ -75,7 +75,6 @@ pub enum ErrorCode {
     ConfigInvalidInterval,
     ConfigMissingRequired,
     ConfigInvalidApiKey,
-    ConfigInvalidBaseUrl,
     ConfigInvalidPollingInterval,
     ConfigInvalidCacheTtl,
 }
@@ -137,7 +136,6 @@ impl ErrorCode {
             ErrorCode::ConfigInvalidInterval => "CONFIG_INVALID_INTERVAL",
             ErrorCode::ConfigMissingRequired => "CONFIG_MISSING_REQUIRED",
             ErrorCode::ConfigInvalidApiKey => "CONFIG_INVALID_API_KEY",
-            ErrorCode::ConfigInvalidBaseUrl => "CONFIG_INVALID_BASE_URL",
             ErrorCode::ConfigInvalidPollingInterval => "CONFIG_INVALID_POLLING_INTERVAL",
             ErrorCode::ConfigInvalidCacheTtl => "CONFIG_INVALID_CACHE_TTL",
         }
@@ -228,7 +226,6 @@ impl FlagKitError {
                 | ErrorCode::ConfigInvalidInterval
                 | ErrorCode::ConfigMissingRequired
                 | ErrorCode::ConfigInvalidApiKey
-                | ErrorCode::ConfigInvalidBaseUrl
                 | ErrorCode::ConfigInvalidPollingInterval
                 | ErrorCode::ConfigInvalidCacheTtl
         )
