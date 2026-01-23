@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use url::Url;
+
 use crate::error::{ErrorCode, FlagKitError, Result};
 
 pub const DEFAULT_BASE_URL: &str = "https://api.flagkit.dev/api/v1";
@@ -68,7 +70,7 @@ impl FlagKitOptions {
             ));
         }
 
-        if url::Url::parse(&self.base_url).is_err() {
+        if Url::parse(&self.base_url).is_err() {
             return Err(FlagKitError::config_error(
                 ErrorCode::ConfigInvalidBaseUrl,
                 "Invalid base URL",

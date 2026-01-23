@@ -2,8 +2,8 @@ use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 
-use crate::circuit_breaker::CircuitBreaker;
-use crate::config::FlagKitOptions;
+use super::circuit_breaker::CircuitBreaker;
+use crate::core::FlagKitOptions;
 use crate::error::{ErrorCode, FlagKitError, Result};
 
 pub struct HttpClient {

@@ -4,12 +4,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::cache::FlagCache;
-use crate::config::FlagKitOptions;
-use crate::context::EvaluationContext;
-use crate::error::{ErrorCode, FlagKitError, Result};
-use crate::http_client::HttpClient;
-use crate::types::{EvaluationReason, EvaluationResult, FlagState, FlagValue};
+use crate::core::{FlagCache, FlagKitOptions};
+use crate::error::{Result};
+use crate::http::HttpClient;
+use crate::types::{EvaluationContext, EvaluationReason, EvaluationResult, FlagState, FlagValue};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,7 +112,7 @@ impl FlagKitClient {
     }
 
     pub fn evaluate(&self, flag_key: &str, context: Option<&EvaluationContext>) -> EvaluationResult {
-        let merged_context = self.merge_context(context);
+        let _merged_context = self.merge_context(context);
         let flag = self.cache.get(flag_key);
 
         match flag {

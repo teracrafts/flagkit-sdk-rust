@@ -30,20 +30,30 @@
 //! }
 //! ```
 
-pub mod cache;
-pub mod circuit_breaker;
-pub mod client;
-pub mod config;
-pub mod context;
-pub mod error;
-pub mod http_client;
+// Module declarations
 pub mod types;
+pub mod error;
+pub mod http;
+pub mod core;
+mod client;
 
-pub use client::{FlagKitClient, SharedClient};
-pub use config::{FlagKitOptions, FlagKitOptionsBuilder};
-pub use context::{EvaluationContext, EvaluationContextBuilder};
+// Re-exports from types module
+pub use types::{
+    EvaluationContext, EvaluationContextBuilder, EvaluationReason, EvaluationResult,
+    FlagState, FlagType, FlagValue,
+};
+
+// Re-exports from error module
 pub use error::{ErrorCode, FlagKitError, Result};
-pub use types::{EvaluationReason, EvaluationResult, FlagState, FlagType, FlagValue};
+
+// Re-exports from core module
+pub use core::{FlagKitOptions, FlagKitOptionsBuilder};
+
+// Re-exports from http module
+pub use http::{CircuitBreaker, CircuitState, HttpClient};
+
+// Re-exports from client module
+pub use client::{FlagKitClient, SharedClient};
 
 use once_cell::sync::OnceCell;
 use parking_lot::RwLock;
