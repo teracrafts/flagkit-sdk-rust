@@ -28,7 +28,7 @@ pub struct FlagKitOptions {
     pub circuit_breaker_threshold: u32,
     pub circuit_breaker_reset_timeout: Duration,
     pub bootstrap: Option<HashMap<String, serde_json::Value>>,
-    pub is_local: bool,
+    pub local_port: Option<u16>,
 }
 
 impl FlagKitOptions {
@@ -47,7 +47,7 @@ impl FlagKitOptions {
             circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
-            is_local: false,
+            local_port: None,
         }
     }
 
@@ -103,7 +103,7 @@ pub struct FlagKitOptionsBuilder {
     circuit_breaker_threshold: u32,
     circuit_breaker_reset_timeout: Duration,
     bootstrap: Option<HashMap<String, serde_json::Value>>,
-    is_local: bool,
+    local_port: Option<u16>,
 }
 
 impl FlagKitOptionsBuilder {
@@ -122,7 +122,7 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
-            is_local: false,
+            local_port: None,
         }
     }
 
@@ -186,8 +186,8 @@ impl FlagKitOptionsBuilder {
         self
     }
 
-    pub fn is_local(mut self, value: bool) -> Self {
-        self.is_local = value;
+    pub fn local_port(mut self, port: u16) -> Self {
+        self.local_port = Some(port);
         self
     }
 
@@ -206,7 +206,7 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_threshold: self.circuit_breaker_threshold,
             circuit_breaker_reset_timeout: self.circuit_breaker_reset_timeout,
             bootstrap: self.bootstrap,
-            is_local: self.is_local,
+            local_port: self.local_port,
         }
     }
 }
@@ -216,30 +216,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_local_defaults_to_false() {
+    fn test_local_port_defaults_to_none() {
         let options = FlagKitOptions::new("sdk_test_key");
-        assert!(!options.is_local);
+        assert!(options.local_port.is_none());
     }
 
     #[test]
-    fn test_is_local_builder_defaults_to_false() {
+    fn test_local_port_builder_defaults_to_none() {
         let options = FlagKitOptions::builder("sdk_test_key").build();
-        assert!(!options.is_local);
+        assert!(options.local_port.is_none());
     }
 
     #[test]
-    fn test_is_local_can_be_set_true() {
+    fn test_local_port_can_be_set() {
         let options = FlagKitOptions::builder("sdk_test_key")
-            .is_local(true)
+            .local_port(8200)
             .build();
-        assert!(options.is_local);
-    }
-
-    #[test]
-    fn test_is_local_can_be_set_false() {
-        let options = FlagKitOptions::builder("sdk_test_key")
-            .is_local(false)
-            .build();
-        assert!(!options.is_local);
+        assert_eq!(options.local_port, Some(8200));
     }
 }

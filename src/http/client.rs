@@ -7,7 +7,13 @@ use crate::core::FlagKitOptions;
 use crate::error::{ErrorCode, FlagKitError, Result};
 
 const DEFAULT_BASE_URL: &str = "https://api.flagkit.dev/api/v1";
-const LOCAL_BASE_URL: &str = "http://localhost:8200/api/v1";
+
+pub fn get_base_url(local_port: Option<u16>) -> String {
+    match local_port {
+        Some(port) => format!("http://localhost:{}/api/v1", port),
+        None => DEFAULT_BASE_URL.to_string(),
+    }
+}
 
 pub struct HttpClient {
     client: Client,
@@ -36,12 +42,8 @@ impl HttpClient {
         })
     }
 
-    fn base_url(&self) -> &str {
-        if self.options.is_local {
-            LOCAL_BASE_URL
-        } else {
-            DEFAULT_BASE_URL
-        }
+    fn base_url(&self) -> String {
+        get_base_url(self.options.local_port)
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -203,16 +205,21 @@ mod tests {
     }
 
     #[test]
-    fn test_base_url_local() {
+    fn test_base_url_with_local_port() {
         let options = FlagKitOptions::builder("sdk_test_key")
-            .is_local(true)
+            .local_port(8200)
             .build();
         let client = HttpClient::new(options).unwrap();
-        assert_eq!(client.base_url(), LOCAL_BASE_URL);
+        assert_eq!(client.base_url(), "http://localhost:8200/api/v1");
     }
 
     #[test]
-    fn test_local_base_url_constant() {
-        assert_eq!(LOCAL_BASE_URL, "http://localhost:8200/api/v1");
+    fn test_get_base_url_none() {
+        assert_eq!(get_base_url(None), DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn test_get_base_url_with_port() {
+        assert_eq!(get_base_url(Some(3000)), "http://localhost:3000/api/v1");
     }
 }
