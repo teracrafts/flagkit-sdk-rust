@@ -257,6 +257,21 @@ for handle in handles {
 | `timeout` | 10s | HTTP timeout |
 | `retry_attempts` | 3 | Max retry attempts |
 | `bootstrap` | None | Initial flag data |
+| `is_local` | false | Use local development server (localhost:8200) |
+
+## Local Development
+
+When running FlagKit locally, enable the `is_local` option to connect to the local development server:
+
+```rust
+let options = FlagKitOptions::builder("sdk_your_api_key")
+    .is_local(true)
+    .build();
+
+FlagKit::initialize(options)?;
+```
+
+This connects to `http://localhost:8200/api/v1` instead of the production API.
 
 ## Development
 

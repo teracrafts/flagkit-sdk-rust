@@ -7,6 +7,7 @@ use crate::core::FlagKitOptions;
 use crate::error::{ErrorCode, FlagKitError, Result};
 
 const DEFAULT_BASE_URL: &str = "https://api.flagkit.dev/api/v1";
+const LOCAL_BASE_URL: &str = "http://localhost:8200/api/v1";
 
 pub struct HttpClient {
     client: Client,
@@ -35,6 +36,14 @@ impl HttpClient {
         })
     }
 
+    fn base_url(&self) -> &str {
+        if self.options.is_local {
+            LOCAL_BASE_URL
+        } else {
+            DEFAULT_BASE_URL
+        }
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         self.execute_with_retry(|| async { self.do_get(path).await })
             .await
@@ -46,7 +55,7 @@ impl HttpClient {
     }
 
     async fn do_get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{}{}", DEFAULT_BASE_URL, path);
+        let url = format!("{}{}", self.base_url(), path);
 
         let response = self
             .client
@@ -62,7 +71,7 @@ impl HttpClient {
     }
 
     async fn do_post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
-        let url = format!("{}{}", DEFAULT_BASE_URL, path);
+        let url = format!("{}{}", self.base_url(), path);
 
         let response = self
             .client
@@ -179,5 +188,31 @@ impl HttpClient {
         } else {
             FlagKitError::with_source(ErrorCode::NetworkError, error.to_string(), error)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_base_url_default() {
+        let options = FlagKitOptions::builder("sdk_test_key").build();
+        let client = HttpClient::new(options).unwrap();
+        assert_eq!(client.base_url(), DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn test_base_url_local() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .is_local(true)
+            .build();
+        let client = HttpClient::new(options).unwrap();
+        assert_eq!(client.base_url(), LOCAL_BASE_URL);
+    }
+
+    #[test]
+    fn test_local_base_url_constant() {
+        assert_eq!(LOCAL_BASE_URL, "http://localhost:8200/api/v1");
     }
 }

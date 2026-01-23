@@ -28,6 +28,7 @@ pub struct FlagKitOptions {
     pub circuit_breaker_threshold: u32,
     pub circuit_breaker_reset_timeout: Duration,
     pub bootstrap: Option<HashMap<String, serde_json::Value>>,
+    pub is_local: bool,
 }
 
 impl FlagKitOptions {
@@ -46,6 +47,7 @@ impl FlagKitOptions {
             circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
+            is_local: false,
         }
     }
 
@@ -101,6 +103,7 @@ pub struct FlagKitOptionsBuilder {
     circuit_breaker_threshold: u32,
     circuit_breaker_reset_timeout: Duration,
     bootstrap: Option<HashMap<String, serde_json::Value>>,
+    is_local: bool,
 }
 
 impl FlagKitOptionsBuilder {
@@ -119,6 +122,7 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
+            is_local: false,
         }
     }
 
@@ -182,6 +186,11 @@ impl FlagKitOptionsBuilder {
         self
     }
 
+    pub fn is_local(mut self, value: bool) -> Self {
+        self.is_local = value;
+        self
+    }
+
     pub fn build(self) -> FlagKitOptions {
         FlagKitOptions {
             api_key: self.api_key,
@@ -197,6 +206,40 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_threshold: self.circuit_breaker_threshold,
             circuit_breaker_reset_timeout: self.circuit_breaker_reset_timeout,
             bootstrap: self.bootstrap,
+            is_local: self.is_local,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_local_defaults_to_false() {
+        let options = FlagKitOptions::new("sdk_test_key");
+        assert!(!options.is_local);
+    }
+
+    #[test]
+    fn test_is_local_builder_defaults_to_false() {
+        let options = FlagKitOptions::builder("sdk_test_key").build();
+        assert!(!options.is_local);
+    }
+
+    #[test]
+    fn test_is_local_can_be_set_true() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .is_local(true)
+            .build();
+        assert!(options.is_local);
+    }
+
+    #[test]
+    fn test_is_local_can_be_set_false() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .is_local(false)
+            .build();
+        assert!(!options.is_local);
     }
 }
