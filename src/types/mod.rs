@@ -26,7 +26,8 @@ pub enum EvaluationReason {
     Offline,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A flag value that can be one of several types.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FlagValue {
     Bool(bool),
