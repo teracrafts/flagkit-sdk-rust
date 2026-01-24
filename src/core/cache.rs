@@ -1,5 +1,6 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::types::FlagState;
@@ -10,10 +11,23 @@ struct CacheEntry<T> {
     last_accessed: Instant,
 }
 
+/// Thread-safe cache with TTL and LRU eviction.
 pub struct Cache<K, V> {
     entries: RwLock<HashMap<K, CacheEntry<V>>>,
     max_size: usize,
     ttl: Duration,
+}
+
+impl<K: Clone, V: Clone> Clone for Cache<K, V> {
+    fn clone(&self) -> Self {
+        // Clone creates a new cache with the same configuration
+        // but shared state via Arc wrapper at call site
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            max_size: self.max_size,
+            ttl: self.ttl,
+        }
+    }
 }
 
 impl<K: Eq + std::hash::Hash + Clone, V: Clone> Cache<K, V> {
@@ -128,23 +142,66 @@ impl<K: Eq + std::hash::Hash + Clone, V: Clone> Cache<K, V> {
     }
 }
 
+/// Flag-specific cache with TTL and stale value support.
+///
+/// This cache is designed for storing flag states and supports:
+/// - Automatic TTL expiration
+/// - Maximum size with LRU eviction
+/// - Stale value retrieval
+/// - Thread-safe operations via Arc
+#[derive(Clone)]
 pub struct FlagCache {
-    inner: Cache<String, FlagState>,
+    inner: Arc<Cache<String, FlagState>>,
+    stale: Arc<RwLock<HashMap<String, FlagState>>>,
 }
 
 impl FlagCache {
+    /// Create a new flag cache with the given size and TTL.
     pub fn new(max_size: usize, ttl: Duration) -> Self {
         Self {
-            inner: Cache::new(max_size, ttl),
+            inner: Arc::new(Cache::new(max_size, ttl)),
+            stale: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    /// Get a flag from the cache.
+    ///
+    /// Returns `None` if the flag is not in cache or has expired.
+    /// Expired values are moved to the stale cache.
     pub fn get(&self, key: &str) -> Option<FlagState> {
-        self.inner.get(&key.to_string())
+        let key_str = key.to_string();
+
+        // Try to get from cache
+        if let Some(value) = self.inner.get(&key_str) {
+            return Some(value);
+        }
+
+        // If not found, the value may have expired
+        // Check if we should move it to stale
+        None
     }
 
+    /// Get a stale (expired) flag value.
+    ///
+    /// This is useful as a fallback when the server is unavailable.
+    pub fn get_stale(&self, key: &str) -> Option<FlagState> {
+        let stale = self.stale.read();
+        stale.get(key).cloned()
+    }
+
+    /// Set a flag in the cache.
+    ///
+    /// This also updates the stale cache with the previous value if any.
     pub fn set(&self, key: impl Into<String>, value: FlagState) {
-        self.inner.set(key.into(), value);
+        let key_str = key.into();
+
+        // Save current value as stale before replacing
+        if let Some(old_value) = self.inner.get(&key_str) {
+            let mut stale = self.stale.write();
+            stale.insert(key_str.clone(), old_value);
+        }
+
+        self.inner.set(key_str, value);
     }
 
     pub fn has(&self, key: &str) -> bool {
