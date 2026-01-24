@@ -48,21 +48,22 @@ pub use types::{
 pub use error::{ErrorCode, FlagKitError, Result};
 
 // Re-exports from core module
-pub use core::{FlagKitOptions, FlagKitOptionsBuilder};
+pub use core::{
+    ContextManager, Event, EventQueue, EventQueueConfig, FlagKitOptions, FlagKitOptionsBuilder,
+    PollCallback, PollingConfig, PollingManager,
+};
 
 // Re-exports from http module
-pub use http::{CircuitBreaker, CircuitState, HttpClient};
+pub use http::{CircuitBreaker, CircuitState, HttpClient, RetryConfig};
 
 // Re-exports from client module
 pub use client::{FlagKitClient, SharedClient};
 
 use once_cell::sync::OnceCell;
-use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 static INSTANCE: OnceCell<Arc<FlagKitClient>> = OnceCell::new();
-static INITIALIZED: RwLock<bool> = RwLock::new(false);
 
 /// Static factory for FlagKit SDK with singleton pattern.
 pub struct FlagKit;
@@ -184,5 +185,30 @@ impl FlagKit {
     /// Gets all cached flags.
     pub fn get_all_flags() -> HashMap<String, FlagState> {
         Self::instance().get_all_flags()
+    }
+
+    /// Gets all flag keys.
+    pub fn get_all_flag_keys() -> Vec<String> {
+        Self::instance().get_all_flag_keys()
+    }
+
+    /// Check if a flag exists.
+    pub fn has_flag(flag_key: &str) -> bool {
+        Self::instance().has_flag(flag_key)
+    }
+
+    /// Evaluate all flags.
+    pub fn evaluate_all(context: Option<&EvaluationContext>) -> HashMap<String, EvaluationResult> {
+        Self::instance().evaluate_all(context)
+    }
+
+    /// Track a custom event.
+    pub fn track(event_type: impl Into<String>, event_data: Option<HashMap<String, serde_json::Value>>) {
+        Self::instance().track(event_type, event_data);
+    }
+
+    /// Reset to anonymous state.
+    pub fn reset() {
+        Self::instance().reset();
     }
 }
