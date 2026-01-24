@@ -35,6 +35,7 @@ pub mod types;
 pub mod error;
 pub mod http;
 pub mod core;
+pub mod security;
 mod client;
 
 // Re-exports from types module
