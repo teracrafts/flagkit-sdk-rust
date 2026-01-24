@@ -1,5 +1,6 @@
 use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::circuit_breaker::CircuitBreaker;
@@ -15,13 +16,19 @@ pub fn get_base_url(local_port: Option<u16>) -> String {
     }
 }
 
+/// HTTP client for FlagKit API communication.
+///
+/// This client handles API requests with retry logic and circuit breaker.
+/// It is cloneable and uses `Arc` internally for shared state.
+#[derive(Clone)]
 pub struct HttpClient {
     client: Client,
-    circuit_breaker: CircuitBreaker,
+    circuit_breaker: Arc<CircuitBreaker>,
     options: FlagKitOptions,
 }
 
 impl HttpClient {
+    /// Create a new HTTP client with the given options.
     pub fn new(options: FlagKitOptions) -> Result<Self> {
         let client = Client::builder()
             .timeout(options.timeout)
@@ -30,10 +37,10 @@ impl HttpClient {
                 FlagKitError::with_source(ErrorCode::NetworkError, "Failed to create HTTP client", e)
             })?;
 
-        let circuit_breaker = CircuitBreaker::new(
+        let circuit_breaker = Arc::new(CircuitBreaker::new(
             options.circuit_breaker_threshold,
             options.circuit_breaker_reset_timeout,
-        );
+        ));
 
         Ok(Self {
             client,
