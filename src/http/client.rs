@@ -62,7 +62,6 @@ impl HttpClient {
         let response = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.options.api_key))
             .header("X-API-Key", &self.options.api_key)
             .header("User-Agent", "FlagKit-Rust/1.0.0")
             .send()
@@ -78,7 +77,6 @@ impl HttpClient {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.options.api_key))
             .header("X-API-Key", &self.options.api_key)
             .header("User-Agent", "FlagKit-Rust/1.0.0")
             .header("Content-Type", "application/json")
