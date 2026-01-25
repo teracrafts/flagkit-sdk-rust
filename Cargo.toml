@@ -24,6 +24,14 @@ url = "2.5"
 uuid = { version = "1.6", features = ["v4"] }
 urlencoding = "2.1"
 
+# Security/crypto dependencies
+hmac = "0.12"
+sha2 = "0.10"
+aes-gcm = "0.10"
+pbkdf2 = { version = "0.12", features = ["simple"] }
+base64 = "0.22"
+hex = "0.4"
+
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.5"

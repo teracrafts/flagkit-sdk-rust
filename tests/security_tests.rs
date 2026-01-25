@@ -1,9 +1,12 @@
 use flagkit::security::{
-    detect_potential_pii, detect_potential_pii_with_config, is_client_key, is_potential_pii_field,
-    is_potential_pii_field_with_config, is_server_key, validate_api_key_security,
-    warn_if_potential_pii, warn_if_potential_pii_with_config, warn_if_server_key_in_browser,
-    DataType, Logger, SecurityConfig,
+    check_pii_strict, detect_potential_pii, detect_potential_pii_with_config, is_client_key,
+    is_potential_pii_field, is_potential_pii_field_with_config, is_production_environment,
+    is_server_key, sign_request, validate_api_key_security, validate_local_port,
+    verify_signature, warn_if_potential_pii, warn_if_potential_pii_with_config,
+    warn_if_server_key_in_browser, ApiKeyManager, DataType, EncryptedCache, Logger,
+    SecurityConfig,
 };
+use flagkit::ErrorCode;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -359,6 +362,26 @@ mod detect_potential_pii_tests {
         assert!(pii.contains(&"items[0].email".to_string()));
         assert!(pii.contains(&"items[4].password".to_string()));
     }
+
+    #[test]
+    fn respects_private_attributes() {
+        let config = SecurityConfig::builder()
+            .add_private_attribute("email")
+            .add_private_attribute("ssn")
+            .build();
+
+        let data = json!({
+            "email": "test@example.com",
+            "ssn": "123-45-6789",
+            "phone": "555-1234"
+        });
+
+        let pii = detect_potential_pii_with_config(&data, "", Some(&config));
+
+        assert!(!pii.contains(&"email".to_string()));
+        assert!(!pii.contains(&"ssn".to_string()));
+        assert!(pii.contains(&"phone".to_string()));
+    }
 }
 
 // =============================================================================
@@ -465,6 +488,78 @@ mod warn_if_potential_pii_tests {
 
         assert_eq!(logger.warning_count(), 1);
         assert!(logger.has_warning_containing("employee_id"));
+    }
+}
+
+// =============================================================================
+// Strict PII Mode tests
+// =============================================================================
+
+mod strict_pii_mode_tests {
+    use super::*;
+
+    #[test]
+    fn check_pii_strict_disabled() {
+        let config = SecurityConfig::builder().strict_pii_mode(false).build();
+
+        let data = json!({ "email": "test@example.com" });
+        let result = check_pii_strict(Some(&data), DataType::Context, &config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn check_pii_strict_enabled_with_pii() {
+        let config = SecurityConfig::builder().strict_pii_mode(true).build();
+
+        let data = json!({ "email": "test@example.com" });
+        let result = check_pii_strict(Some(&data), DataType::Context, &config);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityPiiDetected);
+        assert!(err.message.contains("email"));
+    }
+
+    #[test]
+    fn check_pii_strict_with_private_attributes() {
+        let config = SecurityConfig::builder()
+            .strict_pii_mode(true)
+            .add_private_attribute("email")
+            .build();
+
+        let data = json!({ "email": "test@example.com" });
+        let result = check_pii_strict(Some(&data), DataType::Context, &config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn check_pii_strict_no_data() {
+        let config = SecurityConfig::builder().strict_pii_mode(true).build();
+
+        let result = check_pii_strict(None, DataType::Context, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn check_pii_strict_partial_coverage() {
+        let config = SecurityConfig::builder()
+            .strict_pii_mode(true)
+            .add_private_attribute("email")
+            .build();
+
+        let data = json!({
+            "email": "test@example.com",
+            "phone": "555-1234"
+        });
+
+        let result = check_pii_strict(Some(&data), DataType::Context, &config);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("phone"));
+        assert!(!err.message.contains("email"));
     }
 }
 
@@ -619,6 +714,366 @@ mod validate_api_key_security_tests {
 }
 
 // =============================================================================
+// Local Port Restriction tests
+// =============================================================================
+
+mod local_port_restriction_tests {
+    use super::*;
+
+    #[test]
+    fn validate_local_port_none() {
+        let result = validate_local_port(None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_local_port_non_production() {
+        // Ensure we're not in production
+        std::env::remove_var("RUST_ENV");
+        std::env::remove_var("APP_ENV");
+
+        let result = validate_local_port(Some(8200));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_production_environment_default() {
+        std::env::remove_var("RUST_ENV");
+        std::env::remove_var("APP_ENV");
+
+        assert!(!is_production_environment());
+    }
+}
+
+// =============================================================================
+// Request Signing tests
+// =============================================================================
+
+mod request_signing_tests {
+    use super::*;
+
+    #[test]
+    fn sign_request_creates_valid_signature() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let result = sign_request(body, "sdk_test_key");
+
+        assert!(result.is_ok());
+        let signature = result.unwrap();
+
+        assert!(!signature.signature.is_empty());
+        assert!(signature.timestamp > 0);
+        assert_eq!(signature.key_id.len(), 8);
+    }
+
+    #[test]
+    fn verify_signature_valid() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let api_key = "sdk_test_key";
+
+        let signature = sign_request(body, api_key).unwrap();
+
+        let is_valid =
+            verify_signature(body, &signature.signature, signature.timestamp, api_key).unwrap();
+
+        assert!(is_valid);
+    }
+
+    #[test]
+    fn verify_signature_wrong_body() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let api_key = "sdk_test_key";
+
+        let signature = sign_request(body, api_key).unwrap();
+
+        let wrong_body = r#"{"flag_key": "other-flag"}"#;
+        let is_valid =
+            verify_signature(wrong_body, &signature.signature, signature.timestamp, api_key)
+                .unwrap();
+
+        assert!(!is_valid);
+    }
+
+    #[test]
+    fn verify_signature_wrong_key() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let api_key = "sdk_test_key";
+
+        let signature = sign_request(body, api_key).unwrap();
+
+        let wrong_key = "sdk_wrong_key";
+        let is_valid =
+            verify_signature(body, &signature.signature, signature.timestamp, wrong_key).unwrap();
+
+        assert!(!is_valid);
+    }
+
+    #[test]
+    fn verify_signature_wrong_timestamp() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let api_key = "sdk_test_key";
+
+        let signature = sign_request(body, api_key).unwrap();
+
+        let is_valid =
+            verify_signature(body, &signature.signature, signature.timestamp + 1, api_key).unwrap();
+
+        assert!(!is_valid);
+    }
+
+    #[test]
+    fn signature_headers() {
+        let body = r#"{"test": true}"#;
+        let signature = sign_request(body, "sdk_key").unwrap();
+
+        assert_eq!(signature.x_signature(), signature.signature);
+        assert_eq!(signature.x_timestamp(), signature.timestamp.to_string());
+        assert_eq!(signature.x_key_id(), signature.key_id);
+    }
+
+    #[test]
+    fn different_bodies_different_signatures() {
+        let api_key = "sdk_test_key";
+        let sig1 = sign_request(r#"{"a": 1}"#, api_key).unwrap();
+        let sig2 = sign_request(r#"{"b": 2}"#, api_key).unwrap();
+
+        assert_ne!(sig1.signature, sig2.signature);
+    }
+
+    #[test]
+    fn different_keys_different_signatures() {
+        let body = r#"{"test": true}"#;
+        let sig1 = sign_request(body, "sdk_key_1").unwrap();
+        let sig2 = sign_request(body, "sdk_key_2").unwrap();
+
+        assert_ne!(sig1.signature, sig2.signature);
+        assert_ne!(sig1.key_id, sig2.key_id);
+    }
+}
+
+// =============================================================================
+// Key Rotation tests
+// =============================================================================
+
+mod key_rotation_tests {
+    use super::*;
+
+    #[test]
+    fn api_key_manager_no_secondary() {
+        let manager = ApiKeyManager::new("sdk_primary", None);
+
+        assert_eq!(manager.current_key(), "sdk_primary");
+        assert!(!manager.is_using_secondary());
+        assert!(!manager.has_secondary_key());
+
+        let rotated = manager.handle_401_error().unwrap();
+        assert!(!rotated);
+    }
+
+    #[test]
+    fn api_key_manager_with_secondary() {
+        let manager = ApiKeyManager::new("sdk_primary", Some("sdk_secondary".to_string()));
+
+        assert_eq!(manager.current_key(), "sdk_primary");
+        assert!(!manager.is_using_secondary());
+        assert!(manager.has_secondary_key());
+
+        let rotated = manager.handle_401_error().unwrap();
+        assert!(rotated);
+        assert!(manager.is_using_secondary());
+        assert_eq!(manager.current_key(), "sdk_secondary");
+    }
+
+    #[test]
+    fn api_key_manager_double_rotation_fails() {
+        let manager = ApiKeyManager::new("sdk_primary", Some("sdk_secondary".to_string()));
+
+        // First rotation succeeds
+        let rotated = manager.handle_401_error().unwrap();
+        assert!(rotated);
+
+        // Second rotation fails
+        let result = manager.handle_401_error();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::SecurityKeyRotationFailed);
+    }
+
+    #[test]
+    fn api_key_manager_reset() {
+        let manager = ApiKeyManager::new("sdk_primary", Some("sdk_secondary".to_string()));
+
+        manager.handle_401_error().unwrap();
+        assert!(manager.is_using_secondary());
+
+        manager.reset_to_primary();
+        assert!(!manager.is_using_secondary());
+        assert_eq!(manager.current_key(), "sdk_primary");
+    }
+
+    #[test]
+    fn api_key_manager_multiple_resets() {
+        let manager = ApiKeyManager::new("sdk_primary", Some("sdk_secondary".to_string()));
+
+        // Rotate and reset multiple times
+        for _ in 0..3 {
+            manager.handle_401_error().unwrap();
+            assert!(manager.is_using_secondary());
+
+            manager.reset_to_primary();
+            assert!(!manager.is_using_secondary());
+        }
+    }
+}
+
+// =============================================================================
+// Cache Encryption tests
+// =============================================================================
+
+mod cache_encryption_tests {
+    use super::*;
+
+    const NONCE_SIZE: usize = 12;
+
+    #[test]
+    fn encrypted_cache_roundtrip() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let plaintext = b"Hello, World!";
+        let encrypted = cache.encrypt(plaintext).unwrap();
+
+        assert_ne!(encrypted.as_slice(), plaintext);
+        assert!(encrypted.len() > NONCE_SIZE);
+
+        let decrypted = cache.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypted_cache_json_roundtrip() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let value = json!({
+            "flags": {
+                "feature-a": true,
+                "feature-b": "enabled"
+            }
+        });
+
+        let encrypted = cache.encrypt_json(&value).unwrap();
+        let decrypted = cache.decrypt_json(&encrypted).unwrap();
+
+        assert_eq!(decrypted, value);
+    }
+
+    #[test]
+    fn encrypted_cache_different_keys() {
+        let cache1 = EncryptedCache::new("sdk_key_1").unwrap();
+        let cache2 = EncryptedCache::new("sdk_key_2").unwrap();
+
+        let plaintext = b"Secret data";
+        let encrypted = cache1.encrypt(plaintext).unwrap();
+
+        // Should fail to decrypt with wrong key
+        let result = cache2.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_cache_tampered_data() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let plaintext = b"Secret data";
+        let mut encrypted = cache.encrypt(plaintext).unwrap();
+
+        // Tamper with the ciphertext
+        if let Some(last) = encrypted.last_mut() {
+            *last ^= 0xFF;
+        }
+
+        let result = cache.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypted_cache_too_short() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let result = cache.decrypt(&[0u8; 5]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::CacheDecryptionError);
+    }
+
+    #[test]
+    fn encrypted_cache_unique_nonces() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+        let plaintext = b"Same data";
+
+        // Encrypt the same data multiple times
+        let encrypted1 = cache.encrypt(plaintext).unwrap();
+        let encrypted2 = cache.encrypt(plaintext).unwrap();
+        let encrypted3 = cache.encrypt(plaintext).unwrap();
+
+        // Each encryption should produce different ciphertext due to random nonce
+        assert_ne!(encrypted1, encrypted2);
+        assert_ne!(encrypted2, encrypted3);
+        assert_ne!(encrypted1, encrypted3);
+
+        // But all should decrypt to the same plaintext
+        assert_eq!(cache.decrypt(&encrypted1).unwrap(), plaintext);
+        assert_eq!(cache.decrypt(&encrypted2).unwrap(), plaintext);
+        assert_eq!(cache.decrypt(&encrypted3).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn encrypted_cache_empty_data() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let plaintext = b"";
+        let encrypted = cache.encrypt(plaintext).unwrap();
+        let decrypted = cache.decrypt(&encrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypted_cache_large_data() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let plaintext: Vec<u8> = (0..10000).map(|i| (i % 256) as u8).collect();
+        let encrypted = cache.encrypt(&plaintext).unwrap();
+        let decrypted = cache.decrypt(&encrypted).unwrap();
+
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypted_cache_complex_json() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let value = json!({
+            "flags": {
+                "feature-a": true,
+                "feature-b": "enabled",
+                "feature-c": 42,
+                "feature-d": null,
+                "feature-e": [1, 2, 3],
+                "feature-f": {
+                    "nested": true
+                }
+            },
+            "metadata": {
+                "version": "1.0.0",
+                "timestamp": 1234567890
+            }
+        });
+
+        let encrypted = cache.encrypt_json(&value).unwrap();
+        let decrypted = cache.decrypt_json(&encrypted).unwrap();
+
+        assert_eq!(decrypted, value);
+    }
+}
+
+// =============================================================================
 // SecurityConfig tests
 // =============================================================================
 
@@ -631,6 +1086,11 @@ mod security_config_tests {
 
         assert!(config.warn_on_server_key_in_browser);
         assert!(config.additional_pii_patterns.is_empty());
+        assert!(!config.strict_pii_mode);
+        assert!(config.private_attributes.is_empty());
+        assert!(config.secondary_api_key.is_none());
+        assert!(!config.enable_request_signing);
+        assert!(!config.enable_cache_encryption);
     }
 
     #[test]
@@ -647,6 +1107,11 @@ mod security_config_tests {
             .warn_on_potential_pii(false)
             .warn_on_server_key_in_browser(false)
             .additional_pii_patterns(vec!["custom1".to_string(), "custom2".to_string()])
+            .strict_pii_mode(true)
+            .private_attributes(vec!["email".to_string()])
+            .secondary_api_key("sdk_secondary")
+            .enable_request_signing(true)
+            .enable_cache_encryption(true)
             .build();
 
         assert!(!config.warn_on_potential_pii);
@@ -654,6 +1119,11 @@ mod security_config_tests {
         assert_eq!(config.additional_pii_patterns.len(), 2);
         assert!(config.additional_pii_patterns.contains(&"custom1".to_string()));
         assert!(config.additional_pii_patterns.contains(&"custom2".to_string()));
+        assert!(config.strict_pii_mode);
+        assert!(config.private_attributes.contains(&"email".to_string()));
+        assert_eq!(config.secondary_api_key, Some("sdk_secondary".to_string()));
+        assert!(config.enable_request_signing);
+        assert!(config.enable_cache_encryption);
     }
 
     #[test]
@@ -665,6 +1135,16 @@ mod security_config_tests {
             .build();
 
         assert_eq!(config.additional_pii_patterns.len(), 3);
+    }
+
+    #[test]
+    fn builder_add_single_private_attribute() {
+        let config = SecurityConfig::builder()
+            .add_private_attribute("attr1")
+            .add_private_attribute("attr2")
+            .build();
+
+        assert_eq!(config.private_attributes.len(), 2);
     }
 
     #[test]
@@ -792,5 +1272,50 @@ mod integration_tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn full_security_workflow_with_encryption_and_signing() {
+        // Create a security config with all features enabled
+        let config = SecurityConfig::builder()
+            .strict_pii_mode(true)
+            .add_private_attribute("user_id")
+            .secondary_api_key("sdk_backup_key")
+            .enable_request_signing(true)
+            .enable_cache_encryption(true)
+            .build();
+
+        // Create encrypted cache
+        let cache = EncryptedCache::new("sdk_primary_key").unwrap();
+
+        // Encrypt some flag data
+        let flag_data = json!({
+            "feature-x": true,
+            "feature-y": "variant-a"
+        });
+        let encrypted = cache.encrypt_json(&flag_data).unwrap();
+        let decrypted = cache.decrypt_json(&encrypted).unwrap();
+        assert_eq!(decrypted, flag_data);
+
+        // Sign a request
+        let request_body = serde_json::to_string(&json!({
+            "flag_key": "feature-x",
+            "user_id": "user-123"
+        }))
+        .unwrap();
+        let signature = sign_request(&request_body, "sdk_primary_key").unwrap();
+        assert!(verify_signature(&request_body, &signature.signature, signature.timestamp, "sdk_primary_key").unwrap());
+
+        // Check PII with private attributes
+        let context = json!({
+            "user_id": "user-123",
+            "name": "John"
+        });
+        let result = check_pii_strict(Some(&context), DataType::Context, &config);
+        assert!(result.is_ok()); // user_id is a private attribute
+
+        // Test key rotation
+        let key_manager = ApiKeyManager::new("sdk_primary_key", config.secondary_api_key.clone());
+        assert_eq!(key_manager.current_key(), "sdk_primary_key");
     }
 }

@@ -1,9 +1,38 @@
 //! Security utilities for FlagKit SDK
 //!
-//! This module provides utilities for detecting potential PII in data,
-//! validating API key types, and warning about security concerns.
+//! This module provides comprehensive security features including:
+//! - PII detection and warnings
+//! - Request signing with HMAC-SHA256
+//! - Local port restriction in production
+//! - API key rotation with automatic failover
+//! - Strict PII mode enforcement
+//! - Cache encryption using AES-256-GCM
 
+use aes_gcm::{
+    aead::{Aead, KeyInit as AesKeyInit},
+    Aes256Gcm, Nonce,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use hmac::{Hmac, Mac};
+use pbkdf2::pbkdf2_hmac_array;
 use serde_json::Value;
+use sha2::Sha256;
+use std::env;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::error::{ErrorCode, FlagKitError, Result};
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Salt for PBKDF2 key derivation
+const PBKDF2_SALT: &[u8] = b"flagkit-cache-encryption-salt";
+
+/// Number of PBKDF2 iterations
+const PBKDF2_ITERATIONS: u32 = 100_000;
+
+/// Nonce size for AES-256-GCM (96 bits = 12 bytes)
+const NONCE_SIZE: usize = 12;
 
 /// Logger trait for security warnings
 ///
@@ -82,6 +111,21 @@ pub struct SecurityConfig {
 
     /// Custom PII patterns to detect (in addition to built-in patterns)
     pub additional_pii_patterns: Vec<String>,
+
+    /// Enable strict PII mode - returns SecurityError instead of warning
+    pub strict_pii_mode: bool,
+
+    /// Private attributes that are allowed to contain PII
+    pub private_attributes: Vec<String>,
+
+    /// Secondary API key for automatic failover on 401 errors
+    pub secondary_api_key: Option<String>,
+
+    /// Enable request signing with HMAC-SHA256
+    pub enable_request_signing: bool,
+
+    /// Enable cache encryption
+    pub enable_cache_encryption: bool,
 }
 
 impl Default for SecurityConfig {
@@ -91,6 +135,11 @@ impl Default for SecurityConfig {
             warn_on_potential_pii: cfg!(debug_assertions),
             warn_on_server_key_in_browser: true,
             additional_pii_patterns: Vec::new(),
+            strict_pii_mode: false,
+            private_attributes: Vec::new(),
+            secondary_api_key: None,
+            enable_request_signing: false,
+            enable_cache_encryption: false,
         }
     }
 }
@@ -113,6 +162,11 @@ pub struct SecurityConfigBuilder {
     warn_on_potential_pii: Option<bool>,
     warn_on_server_key_in_browser: Option<bool>,
     additional_pii_patterns: Vec<String>,
+    strict_pii_mode: bool,
+    private_attributes: Vec<String>,
+    secondary_api_key: Option<String>,
+    enable_request_signing: bool,
+    enable_cache_encryption: bool,
 }
 
 impl SecurityConfigBuilder {
@@ -140,12 +194,53 @@ impl SecurityConfigBuilder {
         self
     }
 
+    /// Enable strict PII mode - returns SecurityError instead of warning
+    pub fn strict_pii_mode(mut self, strict: bool) -> Self {
+        self.strict_pii_mode = strict;
+        self
+    }
+
+    /// Set private attributes that are allowed to contain PII
+    pub fn private_attributes(mut self, attributes: Vec<String>) -> Self {
+        self.private_attributes = attributes;
+        self
+    }
+
+    /// Add a single private attribute
+    pub fn add_private_attribute(mut self, attribute: impl Into<String>) -> Self {
+        self.private_attributes.push(attribute.into());
+        self
+    }
+
+    /// Set secondary API key for automatic failover
+    pub fn secondary_api_key(mut self, key: impl Into<String>) -> Self {
+        self.secondary_api_key = Some(key.into());
+        self
+    }
+
+    /// Enable request signing with HMAC-SHA256
+    pub fn enable_request_signing(mut self, enable: bool) -> Self {
+        self.enable_request_signing = enable;
+        self
+    }
+
+    /// Enable cache encryption
+    pub fn enable_cache_encryption(mut self, enable: bool) -> Self {
+        self.enable_cache_encryption = enable;
+        self
+    }
+
     /// Build the security configuration
     pub fn build(self) -> SecurityConfig {
         SecurityConfig {
             warn_on_potential_pii: self.warn_on_potential_pii.unwrap_or(cfg!(debug_assertions)),
             warn_on_server_key_in_browser: self.warn_on_server_key_in_browser.unwrap_or(true),
             additional_pii_patterns: self.additional_pii_patterns,
+            strict_pii_mode: self.strict_pii_mode,
+            private_attributes: self.private_attributes,
+            secondary_api_key: self.secondary_api_key,
+            enable_request_signing: self.enable_request_signing,
+            enable_cache_encryption: self.enable_cache_encryption,
         }
     }
 }
@@ -274,7 +369,16 @@ pub fn detect_potential_pii_with_config(
                 format!("{}.{}", prefix, key)
             };
 
-            if is_potential_pii_field_with_config(key, config) {
+            // Check if this field is in private_attributes
+            let is_private = config
+                .map(|cfg| {
+                    cfg.private_attributes
+                        .iter()
+                        .any(|attr| attr == key || full_path.ends_with(attr))
+                })
+                .unwrap_or(false);
+
+            if !is_private && is_potential_pii_field_with_config(key, config) {
                 pii_fields.push(full_path.clone());
             }
 
@@ -394,6 +498,57 @@ pub fn warn_if_potential_pii_with_config(
             suggestion
         ));
     }
+}
+
+/// Check PII in strict mode - returns error if PII detected without private_attributes
+///
+/// In strict PII mode, if potential PII is detected and the field is not marked
+/// as a private attribute, this function returns a SecurityError instead of just
+/// warning.
+///
+/// # Arguments
+///
+/// * `data` - Optional JSON data to check
+/// * `data_type` - The type of data being checked (context or event)
+/// * `config` - Security configuration
+///
+/// # Returns
+///
+/// * `Ok(())` - No PII detected or all PII fields are in private_attributes
+/// * `Err(FlagKitError)` - PII detected in strict mode without private_attributes
+pub fn check_pii_strict(
+    data: Option<&Value>,
+    data_type: DataType,
+    config: &SecurityConfig,
+) -> Result<()> {
+    if !config.strict_pii_mode {
+        return Ok(());
+    }
+
+    let Some(data) = data else {
+        return Ok(());
+    };
+
+    let pii_fields = detect_potential_pii_with_config(data, "", Some(config));
+
+    if !pii_fields.is_empty() {
+        let suggestion = match data_type {
+            DataType::Context => "Add these fields to private_attributes or remove the PII data.",
+            DataType::Event => "Remove sensitive data from events.",
+        };
+
+        return Err(FlagKitError::new(
+            ErrorCode::SecurityPiiDetected,
+            format!(
+                "[FlagKit Security] Potential PII detected in {} data: {}. {}",
+                data_type.as_str(),
+                pii_fields.join(", "),
+                suggestion
+            ),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Check if an API key is a server key
@@ -534,7 +689,7 @@ pub fn validate_api_key_security(
     api_key: &str,
     logger: Option<&dyn Logger>,
     config: Option<&SecurityConfig>,
-) -> Result<(), String> {
+) -> std::result::Result<(), String> {
     if api_key.is_empty() {
         return Err("API key cannot be empty".to_string());
     }
@@ -549,6 +704,461 @@ pub fn validate_api_key_security(
     // Warn about server key in browser
     warn_if_server_key_in_browser_with_config(api_key, logger, config);
 
+    Ok(())
+}
+
+// =============================================================================
+// Local Port Restriction
+// =============================================================================
+
+/// Check if the current environment is production
+///
+/// Checks RUST_ENV and APP_ENV environment variables.
+pub fn is_production_environment() -> bool {
+    let rust_env = env::var("RUST_ENV").unwrap_or_default();
+    let app_env = env::var("APP_ENV").unwrap_or_default();
+
+    rust_env.eq_ignore_ascii_case("production") || app_env.eq_ignore_ascii_case("production")
+}
+
+/// Validate local port usage
+///
+/// Returns a SecurityError if local_port is used when in production environment.
+///
+/// # Arguments
+///
+/// * `local_port` - Optional local port configuration
+///
+/// # Returns
+///
+/// * `Ok(())` - Local port is not configured or not in production
+/// * `Err(FlagKitError)` - Local port is configured in production environment
+///
+/// # Examples
+///
+/// ```no_run
+/// use flagkit::security::validate_local_port;
+///
+/// // In non-production, this is OK
+/// validate_local_port(Some(8200)).unwrap();
+///
+/// // In production (RUST_ENV=production), this would return an error
+/// // validate_local_port(Some(8200)).unwrap_err();
+/// ```
+pub fn validate_local_port(local_port: Option<u16>) -> Result<()> {
+    if local_port.is_some() && is_production_environment() {
+        return Err(FlagKitError::new(
+            ErrorCode::SecurityLocalPortInProduction,
+            "Local port cannot be used in production environment. \
+             Set RUST_ENV or APP_ENV to a non-production value or remove local_port configuration.",
+        ));
+    }
+    Ok(())
+}
+
+// =============================================================================
+// Request Signing (HMAC-SHA256)
+// =============================================================================
+
+/// Request signature headers
+#[derive(Debug, Clone)]
+pub struct RequestSignature {
+    /// HMAC-SHA256 signature of the request body
+    pub signature: String,
+    /// Unix timestamp when the signature was created
+    pub timestamp: u64,
+    /// Key ID (first 8 characters of API key hash)
+    pub key_id: String,
+}
+
+impl RequestSignature {
+    /// Get the X-Signature header value
+    pub fn x_signature(&self) -> &str {
+        &self.signature
+    }
+
+    /// Get the X-Timestamp header value
+    pub fn x_timestamp(&self) -> String {
+        self.timestamp.to_string()
+    }
+
+    /// Get the X-Key-Id header value
+    pub fn x_key_id(&self) -> &str {
+        &self.key_id
+    }
+}
+
+/// Sign a request body using HMAC-SHA256
+///
+/// Generates headers for request signing:
+/// - X-Signature: HMAC-SHA256 signature of the body
+/// - X-Timestamp: Unix timestamp
+/// - X-Key-Id: First 8 characters of the API key hash
+///
+/// # Arguments
+///
+/// * `body` - The request body to sign (JSON string)
+/// * `api_key` - The API key to use for signing
+///
+/// # Returns
+///
+/// * `Ok(RequestSignature)` - The signature headers
+/// * `Err(FlagKitError)` - If signing fails
+///
+/// # Examples
+///
+/// ```
+/// use flagkit::security::sign_request;
+///
+/// let body = r#"{"flag_key": "my-flag"}"#;
+/// let signature = sign_request(body, "sdk_my_api_key").unwrap();
+///
+/// // Use signature headers in HTTP request:
+/// // X-Signature: <signature.signature>
+/// // X-Timestamp: <signature.timestamp>
+/// // X-Key-Id: <signature.key_id>
+/// ```
+pub fn sign_request(body: &str, api_key: &str) -> Result<RequestSignature> {
+    // Get current Unix timestamp
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| {
+            FlagKitError::with_source(
+                ErrorCode::SecuritySignatureError,
+                "Failed to get current timestamp",
+                e,
+            )
+        })?
+        .as_secs();
+
+    // Create the signing payload: timestamp + body
+    let signing_payload = format!("{}.{}", timestamp, body);
+
+    // Create HMAC-SHA256 signature
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(api_key.as_bytes()).map_err(|e| {
+        FlagKitError::new(
+            ErrorCode::SecuritySignatureError,
+            format!("Failed to create HMAC: {}", e),
+        )
+    })?;
+
+    mac.update(signing_payload.as_bytes());
+    let result = mac.finalize();
+    let signature = hex::encode(result.into_bytes());
+
+    // Create key ID from first 8 chars of API key hash
+    let mut key_hasher = <HmacSha256 as Mac>::new_from_slice(b"flagkit-key-id").map_err(|e| {
+        FlagKitError::new(
+            ErrorCode::SecuritySignatureError,
+            format!("Failed to create key ID hash: {}", e),
+        )
+    })?;
+    key_hasher.update(api_key.as_bytes());
+    let key_hash = hex::encode(key_hasher.finalize().into_bytes());
+    let key_id = key_hash[..8].to_string();
+
+    Ok(RequestSignature {
+        signature,
+        timestamp,
+        key_id,
+    })
+}
+
+/// Verify a request signature
+///
+/// # Arguments
+///
+/// * `body` - The request body that was signed
+/// * `signature` - The signature to verify
+/// * `timestamp` - The timestamp used in signing
+/// * `api_key` - The API key used for signing
+///
+/// # Returns
+///
+/// * `Ok(true)` - Signature is valid
+/// * `Ok(false)` - Signature is invalid
+/// * `Err(FlagKitError)` - If verification fails due to an error
+pub fn verify_signature(body: &str, signature: &str, timestamp: u64, api_key: &str) -> Result<bool> {
+    let signing_payload = format!("{}.{}", timestamp, body);
+
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(api_key.as_bytes()).map_err(|e| {
+        FlagKitError::new(
+            ErrorCode::SecuritySignatureError,
+            format!("Failed to create HMAC for verification: {}", e),
+        )
+    })?;
+
+    mac.update(signing_payload.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+
+    Ok(expected == signature)
+}
+
+// =============================================================================
+// Key Rotation
+// =============================================================================
+
+/// API key manager for handling key rotation and failover
+#[derive(Debug)]
+pub struct ApiKeyManager {
+    primary_key: String,
+    secondary_key: Option<String>,
+    using_secondary: AtomicBool,
+}
+
+impl Clone for ApiKeyManager {
+    fn clone(&self) -> Self {
+        Self {
+            primary_key: self.primary_key.clone(),
+            secondary_key: self.secondary_key.clone(),
+            using_secondary: AtomicBool::new(self.using_secondary.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+impl ApiKeyManager {
+    /// Create a new API key manager
+    ///
+    /// # Arguments
+    ///
+    /// * `primary_key` - The primary API key
+    /// * `secondary_key` - Optional secondary API key for failover
+    pub fn new(primary_key: impl Into<String>, secondary_key: Option<String>) -> Self {
+        Self {
+            primary_key: primary_key.into(),
+            secondary_key,
+            using_secondary: AtomicBool::new(false),
+        }
+    }
+
+    /// Get the current active API key
+    pub fn current_key(&self) -> &str {
+        if self.using_secondary.load(Ordering::Relaxed) {
+            self.secondary_key.as_deref().unwrap_or(&self.primary_key)
+        } else {
+            &self.primary_key
+        }
+    }
+
+    /// Check if currently using the secondary key
+    pub fn is_using_secondary(&self) -> bool {
+        self.using_secondary.load(Ordering::Relaxed)
+    }
+
+    /// Handle a 401 unauthorized error by switching to secondary key
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Successfully switched to secondary key
+    /// * `Ok(false)` - No secondary key available or already using secondary
+    /// * `Err(FlagKitError)` - Key rotation failed
+    pub fn handle_401_error(&self) -> Result<bool> {
+        // If we don't have a secondary key, we can't rotate
+        if self.secondary_key.is_none() {
+            return Ok(false);
+        }
+
+        // If we're already using secondary, we can't rotate further
+        if self.is_using_secondary() {
+            return Err(FlagKitError::new(
+                ErrorCode::SecurityKeyRotationFailed,
+                "Both primary and secondary API keys have failed. Please check your API key configuration.",
+            ));
+        }
+
+        // Switch to secondary key
+        self.using_secondary.store(true, Ordering::Relaxed);
+
+        Ok(true)
+    }
+
+    /// Reset to using the primary key
+    pub fn reset_to_primary(&self) {
+        self.using_secondary.store(false, Ordering::Relaxed);
+    }
+
+    /// Check if a secondary key is configured
+    pub fn has_secondary_key(&self) -> bool {
+        self.secondary_key.is_some()
+    }
+}
+
+// =============================================================================
+// Cache Encryption (AES-256-GCM with PBKDF2 key derivation)
+// =============================================================================
+
+/// Encrypted cache storage
+///
+/// Note: This struct does not implement Clone because the underlying cipher
+/// cannot be safely cloned. Create a new instance with the same API key if needed.
+pub struct EncryptedCache {
+    cipher: Aes256Gcm,
+}
+
+impl std::fmt::Debug for EncryptedCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedCache")
+            .field("cipher", &"<AES-256-GCM cipher>")
+            .finish()
+    }
+}
+
+impl EncryptedCache {
+    /// Create a new encrypted cache with key derived from API key using PBKDF2
+    ///
+    /// # Arguments
+    ///
+    /// * `api_key` - The API key to derive encryption key from
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use flagkit::security::EncryptedCache;
+    ///
+    /// let cache = EncryptedCache::new("sdk_my_api_key").unwrap();
+    ///
+    /// // Encrypt some data
+    /// let encrypted = cache.encrypt(b"sensitive data").unwrap();
+    ///
+    /// // Decrypt the data
+    /// let decrypted = cache.decrypt(&encrypted).unwrap();
+    /// assert_eq!(decrypted, b"sensitive data");
+    /// ```
+    pub fn new(api_key: &str) -> Result<Self> {
+        // Derive a 256-bit key from the API key using PBKDF2
+        let key: [u8; 32] =
+            pbkdf2_hmac_array::<Sha256, 32>(api_key.as_bytes(), PBKDF2_SALT, PBKDF2_ITERATIONS);
+
+        let cipher = <Aes256Gcm as AesKeyInit>::new_from_slice(&key).map_err(|e| {
+            FlagKitError::new(
+                ErrorCode::CacheEncryptionError,
+                format!("Failed to create cipher: {}", e),
+            )
+        })?;
+
+        Ok(Self { cipher })
+    }
+
+    /// Encrypt data using AES-256-GCM
+    ///
+    /// The returned bytes contain: nonce (12 bytes) + ciphertext + auth tag
+    ///
+    /// # Arguments
+    ///
+    /// * `plaintext` - The data to encrypt
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<u8>)` - The encrypted data
+    /// * `Err(FlagKitError)` - If encryption fails
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        // Generate a random nonce
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        getrandom(&mut nonce_bytes)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // Encrypt the data
+        let ciphertext = self.cipher.encrypt(nonce, plaintext).map_err(|e| {
+            FlagKitError::new(
+                ErrorCode::CacheEncryptionError,
+                format!("Encryption failed: {}", e),
+            )
+        })?;
+
+        // Prepend nonce to ciphertext
+        let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+        result.extend_from_slice(&nonce_bytes);
+        result.extend(ciphertext);
+
+        Ok(result)
+    }
+
+    /// Decrypt data using AES-256-GCM
+    ///
+    /// # Arguments
+    ///
+    /// * `encrypted` - The encrypted data (nonce + ciphertext + auth tag)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<u8>)` - The decrypted data
+    /// * `Err(FlagKitError)` - If decryption fails
+    pub fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>> {
+        if encrypted.len() < NONCE_SIZE {
+            return Err(FlagKitError::new(
+                ErrorCode::CacheDecryptionError,
+                "Encrypted data too short",
+            ));
+        }
+
+        // Extract nonce and ciphertext
+        let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_SIZE);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        // Decrypt the data
+        self.cipher.decrypt(nonce, ciphertext).map_err(|e| {
+            FlagKitError::new(
+                ErrorCode::CacheDecryptionError,
+                format!("Decryption failed: {}", e),
+            )
+        })
+    }
+
+    /// Encrypt a JSON value
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The JSON value to encrypt
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(String)` - Base64-encoded encrypted data
+    /// * `Err(FlagKitError)` - If encryption fails
+    pub fn encrypt_json(&self, value: &Value) -> Result<String> {
+        let json_str = serde_json::to_string(value).map_err(|e| {
+            FlagKitError::new(
+                ErrorCode::CacheEncryptionError,
+                format!("Failed to serialize JSON: {}", e),
+            )
+        })?;
+
+        let encrypted = self.encrypt(json_str.as_bytes())?;
+        Ok(BASE64.encode(encrypted))
+    }
+
+    /// Decrypt to a JSON value
+    ///
+    /// # Arguments
+    ///
+    /// * `encrypted_base64` - Base64-encoded encrypted data
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Value)` - The decrypted JSON value
+    /// * `Err(FlagKitError)` - If decryption fails
+    pub fn decrypt_json(&self, encrypted_base64: &str) -> Result<Value> {
+        let encrypted = BASE64.decode(encrypted_base64).map_err(|e| {
+            FlagKitError::new(
+                ErrorCode::CacheDecryptionError,
+                format!("Failed to decode base64: {}", e),
+            )
+        })?;
+
+        let decrypted = self.decrypt(&encrypted)?;
+
+        serde_json::from_slice(&decrypted).map_err(|e| {
+            FlagKitError::new(
+                ErrorCode::CacheDecryptionError,
+                format!("Failed to parse JSON: {}", e),
+            )
+        })
+    }
+}
+
+/// Generate random bytes for nonce
+fn getrandom(dest: &mut [u8]) -> Result<()> {
+    use rand::RngCore;
+    rand::thread_rng().fill_bytes(dest);
     Ok(())
 }
 
@@ -728,6 +1338,9 @@ mod tests {
         let config = SecurityConfig::default();
         assert!(config.warn_on_server_key_in_browser);
         assert!(config.additional_pii_patterns.is_empty());
+        assert!(!config.strict_pii_mode);
+        assert!(config.private_attributes.is_empty());
+        assert!(config.secondary_api_key.is_none());
     }
 
     #[test]
@@ -736,11 +1349,24 @@ mod tests {
             .warn_on_potential_pii(false)
             .warn_on_server_key_in_browser(false)
             .add_pii_pattern("custom_field")
+            .strict_pii_mode(true)
+            .add_private_attribute("email")
+            .secondary_api_key("sdk_secondary_key")
+            .enable_request_signing(true)
+            .enable_cache_encryption(true)
             .build();
 
         assert!(!config.warn_on_potential_pii);
         assert!(!config.warn_on_server_key_in_browser);
         assert!(config.additional_pii_patterns.contains(&"custom_field".to_string()));
+        assert!(config.strict_pii_mode);
+        assert!(config.private_attributes.contains(&"email".to_string()));
+        assert_eq!(
+            config.secondary_api_key,
+            Some("sdk_secondary_key".to_string())
+        );
+        assert!(config.enable_request_signing);
+        assert!(config.enable_cache_encryption);
     }
 
     #[test]
@@ -752,6 +1378,25 @@ mod tests {
         assert!(is_potential_pii_field_with_config("custom_secret", Some(&config)));
         assert!(is_potential_pii_field_with_config("my_custom_secret_field", Some(&config)));
         assert!(!is_potential_pii_field_with_config("other_field", Some(&config)));
+    }
+
+    #[test]
+    fn test_private_attributes_excludes_pii() {
+        let config = SecurityConfig::builder()
+            .add_private_attribute("email")
+            .add_private_attribute("ssn")
+            .build();
+
+        let data = serde_json::json!({
+            "email": "test@example.com",
+            "ssn": "123-45-6789",
+            "phone": "555-1234"
+        });
+
+        let pii = detect_potential_pii_with_config(&data, "", Some(&config));
+        assert!(!pii.contains(&"email".to_string()));
+        assert!(!pii.contains(&"ssn".to_string()));
+        assert!(pii.contains(&"phone".to_string()));
     }
 
     #[test]
@@ -866,5 +1511,295 @@ mod tests {
                 field
             );
         }
+    }
+
+    // =============================================================================
+    // Strict PII Mode Tests
+    // =============================================================================
+
+    #[test]
+    fn test_check_pii_strict_disabled() {
+        let config = SecurityConfig::builder().strict_pii_mode(false).build();
+
+        let data = serde_json::json!({ "email": "test@example.com" });
+        let result = check_pii_strict(Some(&data), DataType::Context, &config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_pii_strict_enabled_with_pii() {
+        let config = SecurityConfig::builder().strict_pii_mode(true).build();
+
+        let data = serde_json::json!({ "email": "test@example.com" });
+        let result = check_pii_strict(Some(&data), DataType::Context, &config);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::SecurityPiiDetected);
+        assert!(err.message.contains("email"));
+    }
+
+    #[test]
+    fn test_check_pii_strict_with_private_attributes() {
+        let config = SecurityConfig::builder()
+            .strict_pii_mode(true)
+            .add_private_attribute("email")
+            .build();
+
+        let data = serde_json::json!({ "email": "test@example.com" });
+        let result = check_pii_strict(Some(&data), DataType::Context, &config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_check_pii_strict_no_data() {
+        let config = SecurityConfig::builder().strict_pii_mode(true).build();
+
+        let result = check_pii_strict(None, DataType::Context, &config);
+        assert!(result.is_ok());
+    }
+
+    // =============================================================================
+    // Local Port Restriction Tests
+    // =============================================================================
+
+    #[test]
+    fn test_validate_local_port_none() {
+        let result = validate_local_port(None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_local_port_non_production() {
+        // This test assumes RUST_ENV and APP_ENV are not set to "production"
+        // In actual testing, we would need to control the environment
+        env::remove_var("RUST_ENV");
+        env::remove_var("APP_ENV");
+
+        let result = validate_local_port(Some(8200));
+        assert!(result.is_ok());
+    }
+
+    // Note: Cannot easily test production mode without affecting other tests
+
+    // =============================================================================
+    // Request Signing Tests
+    // =============================================================================
+
+    #[test]
+    fn test_sign_request() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let result = sign_request(body, "sdk_test_key");
+
+        assert!(result.is_ok());
+        let signature = result.unwrap();
+
+        assert!(!signature.signature.is_empty());
+        assert!(signature.timestamp > 0);
+        assert_eq!(signature.key_id.len(), 8);
+    }
+
+    #[test]
+    fn test_verify_signature() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let api_key = "sdk_test_key";
+
+        let signature = sign_request(body, api_key).unwrap();
+
+        let is_valid =
+            verify_signature(body, &signature.signature, signature.timestamp, api_key).unwrap();
+
+        assert!(is_valid);
+    }
+
+    #[test]
+    fn test_verify_signature_wrong_body() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let api_key = "sdk_test_key";
+
+        let signature = sign_request(body, api_key).unwrap();
+
+        let wrong_body = r#"{"flag_key": "other-flag"}"#;
+        let is_valid =
+            verify_signature(wrong_body, &signature.signature, signature.timestamp, api_key)
+                .unwrap();
+
+        assert!(!is_valid);
+    }
+
+    #[test]
+    fn test_verify_signature_wrong_key() {
+        let body = r#"{"flag_key": "my-flag"}"#;
+        let api_key = "sdk_test_key";
+
+        let signature = sign_request(body, api_key).unwrap();
+
+        let wrong_key = "sdk_wrong_key";
+        let is_valid =
+            verify_signature(body, &signature.signature, signature.timestamp, wrong_key).unwrap();
+
+        assert!(!is_valid);
+    }
+
+    #[test]
+    fn test_signature_headers() {
+        let body = r#"{"test": true}"#;
+        let signature = sign_request(body, "sdk_key").unwrap();
+
+        assert_eq!(signature.x_signature(), signature.signature);
+        assert_eq!(signature.x_timestamp(), signature.timestamp.to_string());
+        assert_eq!(signature.x_key_id(), signature.key_id);
+    }
+
+    // =============================================================================
+    // Key Rotation Tests
+    // =============================================================================
+
+    #[test]
+    fn test_api_key_manager_no_secondary() {
+        let manager = ApiKeyManager::new("sdk_primary", None);
+
+        assert_eq!(manager.current_key(), "sdk_primary");
+        assert!(!manager.is_using_secondary());
+        assert!(!manager.has_secondary_key());
+
+        let rotated = manager.handle_401_error().unwrap();
+        assert!(!rotated);
+    }
+
+    #[test]
+    fn test_api_key_manager_with_secondary() {
+        let manager = ApiKeyManager::new("sdk_primary", Some("sdk_secondary".to_string()));
+
+        assert_eq!(manager.current_key(), "sdk_primary");
+        assert!(!manager.is_using_secondary());
+        assert!(manager.has_secondary_key());
+
+        let rotated = manager.handle_401_error().unwrap();
+        assert!(rotated);
+        assert!(manager.is_using_secondary());
+        assert_eq!(manager.current_key(), "sdk_secondary");
+    }
+
+    #[test]
+    fn test_api_key_manager_double_rotation_fails() {
+        let manager = ApiKeyManager::new("sdk_primary", Some("sdk_secondary".to_string()));
+
+        // First rotation succeeds
+        let rotated = manager.handle_401_error().unwrap();
+        assert!(rotated);
+
+        // Second rotation fails
+        let result = manager.handle_401_error();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::SecurityKeyRotationFailed);
+    }
+
+    #[test]
+    fn test_api_key_manager_reset() {
+        let manager = ApiKeyManager::new("sdk_primary", Some("sdk_secondary".to_string()));
+
+        manager.handle_401_error().unwrap();
+        assert!(manager.is_using_secondary());
+
+        manager.reset_to_primary();
+        assert!(!manager.is_using_secondary());
+        assert_eq!(manager.current_key(), "sdk_primary");
+    }
+
+    // =============================================================================
+    // Cache Encryption Tests
+    // =============================================================================
+
+    #[test]
+    fn test_encrypted_cache_roundtrip() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let plaintext = b"Hello, World!";
+        let encrypted = cache.encrypt(plaintext).unwrap();
+
+        assert_ne!(encrypted.as_slice(), plaintext);
+        assert!(encrypted.len() > NONCE_SIZE);
+
+        let decrypted = cache.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypted_cache_json_roundtrip() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let value = serde_json::json!({
+            "flags": {
+                "feature-a": true,
+                "feature-b": "enabled"
+            }
+        });
+
+        let encrypted = cache.encrypt_json(&value).unwrap();
+        let decrypted = cache.decrypt_json(&encrypted).unwrap();
+
+        assert_eq!(decrypted, value);
+    }
+
+    #[test]
+    fn test_encrypted_cache_different_keys() {
+        let cache1 = EncryptedCache::new("sdk_key_1").unwrap();
+        let cache2 = EncryptedCache::new("sdk_key_2").unwrap();
+
+        let plaintext = b"Secret data";
+        let encrypted = cache1.encrypt(plaintext).unwrap();
+
+        // Should fail to decrypt with wrong key
+        let result = cache2.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encrypted_cache_tampered_data() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let plaintext = b"Secret data";
+        let mut encrypted = cache.encrypt(plaintext).unwrap();
+
+        // Tamper with the ciphertext
+        if let Some(last) = encrypted.last_mut() {
+            *last ^= 0xFF;
+        }
+
+        let result = cache.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encrypted_cache_too_short() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+
+        let result = cache.decrypt(&[0u8; 5]);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ErrorCode::CacheDecryptionError);
+    }
+
+    #[test]
+    fn test_encrypted_cache_unique_nonces() {
+        let cache = EncryptedCache::new("sdk_test_key").unwrap();
+        let plaintext = b"Same data";
+
+        // Encrypt the same data multiple times
+        let encrypted1 = cache.encrypt(plaintext).unwrap();
+        let encrypted2 = cache.encrypt(plaintext).unwrap();
+        let encrypted3 = cache.encrypt(plaintext).unwrap();
+
+        // Each encryption should produce different ciphertext due to random nonce
+        assert_ne!(encrypted1, encrypted2);
+        assert_ne!(encrypted2, encrypted3);
+        assert_ne!(encrypted1, encrypted3);
+
+        // But all should decrypt to the same plaintext
+        assert_eq!(cache.decrypt(&encrypted1).unwrap(), plaintext);
+        assert_eq!(cache.decrypt(&encrypted2).unwrap(), plaintext);
+        assert_eq!(cache.decrypt(&encrypted3).unwrap(), plaintext);
     }
 }

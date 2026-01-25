@@ -53,6 +53,8 @@ pub enum ErrorCode {
     CacheInvalidData,
     CacheExpired,
     CacheStorageError,
+    CacheEncryptionError,
+    CacheDecryptionError,
 
     // Event errors
     EventQueueFull,
@@ -77,6 +79,12 @@ pub enum ErrorCode {
     ConfigInvalidApiKey,
     ConfigInvalidPollingInterval,
     ConfigInvalidCacheTtl,
+
+    // Security errors
+    SecurityLocalPortInProduction,
+    SecurityPiiDetected,
+    SecuritySignatureError,
+    SecurityKeyRotationFailed,
 }
 
 impl ErrorCode {
@@ -138,6 +146,12 @@ impl ErrorCode {
             ErrorCode::ConfigInvalidApiKey => "CONFIG_INVALID_API_KEY",
             ErrorCode::ConfigInvalidPollingInterval => "CONFIG_INVALID_POLLING_INTERVAL",
             ErrorCode::ConfigInvalidCacheTtl => "CONFIG_INVALID_CACHE_TTL",
+            ErrorCode::CacheEncryptionError => "CACHE_ENCRYPTION_ERROR",
+            ErrorCode::CacheDecryptionError => "CACHE_DECRYPTION_ERROR",
+            ErrorCode::SecurityLocalPortInProduction => "SECURITY_LOCAL_PORT_IN_PRODUCTION",
+            ErrorCode::SecurityPiiDetected => "SECURITY_PII_DETECTED",
+            ErrorCode::SecuritySignatureError => "SECURITY_SIGNATURE_ERROR",
+            ErrorCode::SecurityKeyRotationFailed => "SECURITY_KEY_ROTATION_FAILED",
         }
     }
 
