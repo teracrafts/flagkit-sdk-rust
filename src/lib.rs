@@ -36,6 +36,7 @@ pub mod error;
 pub mod http;
 pub mod core;
 pub mod security;
+pub mod event_persistence;
 mod client;
 
 // Re-exports from types module
