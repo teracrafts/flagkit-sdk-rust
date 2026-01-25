@@ -23,6 +23,7 @@ tracing = "0.1"
 url = "2.5"
 uuid = { version = "1.6", features = ["v4"] }
 urlencoding = "2.1"
+fs2 = "0.4"
 
 # Security/crypto dependencies
 hmac = "0.12"
@@ -35,6 +36,7 @@ hex = "0.4"
 [dev-dependencies]
 tokio-test = "0.4"
 wiremock = "0.5"
+tempfile = "3.10"
 
 [features]
 default = []
