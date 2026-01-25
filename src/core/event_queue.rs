@@ -2,10 +2,17 @@
 //!
 //! This module provides an event queue that batches events and sends them
 //! to the server periodically or when the batch size is reached.
+//!
+//! # Crash-Resilient Persistence
+//!
+//! When persistence is enabled, events are persisted to disk before being
+//! queued for sending. On crash recovery, unsent events are recovered from
+//! the persistence layer.
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +20,7 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 
 use crate::error::{ErrorCode, FlagKitError, Result};
+use crate::event_persistence::{EventPersistence, EventPersistenceConfig, PersistedEvent};
 
 /// Default batch size (number of events before auto-flush).
 pub const DEFAULT_BATCH_SIZE: usize = 10;
@@ -40,6 +48,18 @@ pub struct EventQueueConfig {
 
     /// Sample rate (0.0 to 1.0). Default: 1.0
     pub sample_rate: f64,
+
+    /// Enable crash-resilient event persistence. Default: false
+    pub persist_events: bool,
+
+    /// Directory path for event storage.
+    pub event_storage_path: Option<PathBuf>,
+
+    /// Maximum number of events to persist. Default: 10000
+    pub max_persisted_events: usize,
+
+    /// Interval between persistence flushes to disk. Default: 1000ms
+    pub persistence_flush_interval: Duration,
 }
 
 impl Default for EventQueueConfig {
@@ -50,6 +70,10 @@ impl Default for EventQueueConfig {
             max_queue_size: DEFAULT_MAX_QUEUE_SIZE,
             enabled: true,
             sample_rate: 1.0,
+            persist_events: false,
+            event_storage_path: None,
+            max_persisted_events: 10000,
+            persistence_flush_interval: Duration::from_millis(1000),
         }
     }
 }
@@ -69,6 +93,10 @@ pub struct EventQueueConfigBuilder {
     max_queue_size: Option<usize>,
     enabled: Option<bool>,
     sample_rate: Option<f64>,
+    persist_events: Option<bool>,
+    event_storage_path: Option<PathBuf>,
+    max_persisted_events: Option<usize>,
+    persistence_flush_interval: Option<Duration>,
 }
 
 impl EventQueueConfigBuilder {
@@ -102,6 +130,30 @@ impl EventQueueConfigBuilder {
         self
     }
 
+    /// Enable crash-resilient event persistence.
+    pub fn persist_events(mut self, enabled: bool) -> Self {
+        self.persist_events = Some(enabled);
+        self
+    }
+
+    /// Set the directory path for event storage.
+    pub fn event_storage_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.event_storage_path = Some(path.into());
+        self
+    }
+
+    /// Set the maximum number of events to persist.
+    pub fn max_persisted_events(mut self, max: usize) -> Self {
+        self.max_persisted_events = Some(max);
+        self
+    }
+
+    /// Set the interval between persistence flushes to disk.
+    pub fn persistence_flush_interval(mut self, interval: Duration) -> Self {
+        self.persistence_flush_interval = Some(interval);
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> EventQueueConfig {
         EventQueueConfig {
@@ -112,6 +164,12 @@ impl EventQueueConfigBuilder {
             max_queue_size: self.max_queue_size.unwrap_or(DEFAULT_MAX_QUEUE_SIZE),
             enabled: self.enabled.unwrap_or(true),
             sample_rate: self.sample_rate.unwrap_or(1.0),
+            persist_events: self.persist_events.unwrap_or(false),
+            event_storage_path: self.event_storage_path,
+            max_persisted_events: self.max_persisted_events.unwrap_or(10000),
+            persistence_flush_interval: self
+                .persistence_flush_interval
+                .unwrap_or(Duration::from_millis(1000)),
         }
     }
 }
@@ -120,6 +178,10 @@ impl EventQueueConfigBuilder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
+    /// Unique event identifier for persistence tracking.
+    #[serde(default = "generate_event_id")]
+    pub id: String,
+
     /// Event type (e.g., "purchase", "page_view").
     pub event_type: String,
 
@@ -149,10 +211,15 @@ pub struct Event {
     pub event_data: Option<HashMap<String, serde_json::Value>>,
 }
 
+fn generate_event_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 impl Event {
     /// Create a new event.
     pub fn new(event_type: impl Into<String>) -> Self {
         Self {
+            id: uuid::Uuid::new_v4().to_string(),
             event_type: event_type.into(),
             timestamp: chrono::Utc::now().to_rfc3339(),
             sdk_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -162,6 +229,42 @@ impl Event {
             user_id: None,
             event_data: None,
         }
+    }
+
+    /// Create an event from a persisted event.
+    pub fn from_persisted(persisted: &PersistedEvent) -> Self {
+        Self {
+            id: persisted.id.clone(),
+            event_type: persisted.event_type.clone(),
+            timestamp: chrono::DateTime::from_timestamp_millis(persisted.timestamp as i64)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            sdk_version: env!("CARGO_PKG_VERSION").to_string(),
+            sdk_language: "rust".to_string(),
+            session_id: persisted.session_id.clone(),
+            environment_id: persisted.environment_id.clone(),
+            user_id: persisted.user_id.clone(),
+            event_data: persisted.data.clone(),
+        }
+    }
+
+    /// Convert to a persisted event.
+    pub fn to_persisted(&self) -> PersistedEvent {
+        let mut persisted = PersistedEvent::with_id(
+            &self.id,
+            &self.event_type,
+            self.event_data.clone(),
+        );
+        if let Some(ref user_id) = self.user_id {
+            persisted = persisted.user_id(user_id);
+        }
+        if let Some(ref session_id) = self.session_id {
+            persisted = persisted.session_id(session_id);
+        }
+        if let Some(ref env_id) = self.environment_id {
+            persisted = persisted.environment_id(env_id);
+        }
+        persisted
     }
 
     /// Set session ID.
@@ -229,6 +332,12 @@ struct EventQueueState {
 /// - The flush interval elapses
 /// - `flush()` is called manually
 /// - The queue is dropped (graceful shutdown)
+///
+/// # Crash-Resilient Persistence
+///
+/// When `persist_events` is enabled, events are persisted to disk before being
+/// queued for sending. On initialization, recovered events are loaded from
+/// the persistence layer.
 pub struct EventQueue {
     config: EventQueueConfig,
     state: Arc<Mutex<EventQueueState>>,
@@ -236,11 +345,36 @@ pub struct EventQueue {
     shutdown_tx: Option<mpsc::Sender<()>>,
     is_running: Arc<AtomicBool>,
     flush_tx: Option<mpsc::Sender<()>>,
+    /// Event persistence manager (if enabled).
+    persistence: Option<Arc<Mutex<EventPersistence>>>,
+    /// Channel for notifying about sent events (for persistence).
+    sent_events_tx: Option<mpsc::Sender<Vec<String>>>,
 }
 
 impl EventQueue {
     /// Create a new event queue.
     pub fn new(config: EventQueueConfig) -> Self {
+        // Initialize persistence if enabled
+        let persistence = if config.persist_events {
+            let storage_path = config.event_storage_path.clone()
+                .unwrap_or_else(|| std::env::temp_dir().join("flagkit-events"));
+
+            let persistence_config = EventPersistenceConfig::new(storage_path)
+                .max_events(config.max_persisted_events)
+                .flush_interval(config.persistence_flush_interval)
+                .buffer_size(config.batch_size);
+
+            match EventPersistence::new(persistence_config) {
+                Ok(p) => Some(Arc::new(Mutex::new(p))),
+                Err(e) => {
+                    tracing::error!("Failed to initialize event persistence: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             state: Arc::new(Mutex::new(EventQueueState {
@@ -253,12 +387,39 @@ impl EventQueue {
             shutdown_tx: None,
             is_running: Arc::new(AtomicBool::new(false)),
             flush_tx: None,
+            persistence,
+            sent_events_tx: None,
         }
     }
 
     /// Create a new event queue with default configuration.
     pub fn with_defaults() -> Self {
         Self::new(EventQueueConfig::default())
+    }
+
+    /// Recover events from persistence on startup.
+    ///
+    /// This should be called after creating the queue but before starting it.
+    /// Recovered events will be re-queued for sending.
+    pub fn recover_events(&self) -> Result<usize> {
+        let persistence = match &self.persistence {
+            Some(p) => p,
+            None => return Ok(0),
+        };
+
+        let recovered = persistence.lock().recover()?;
+        let count = recovered.len();
+
+        if count > 0 {
+            let mut state = self.state.lock();
+            for persisted in recovered {
+                let event = Event::from_persisted(&persisted);
+                state.events.push(event);
+            }
+            tracing::info!("Recovered {} events from persistence", count);
+        }
+
+        Ok(count)
     }
 
     /// Set the event sender callback.
@@ -296,14 +457,17 @@ impl EventQueue {
 
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let (flush_tx, mut flush_rx) = mpsc::channel::<()>(10);
+        let (sent_events_tx, mut sent_events_rx) = mpsc::channel::<Vec<String>>(10);
         self.shutdown_tx = Some(shutdown_tx);
         self.flush_tx = Some(flush_tx);
+        self.sent_events_tx = Some(sent_events_tx.clone());
         self.is_running.store(true, Ordering::SeqCst);
 
         let state = Arc::clone(&self.state);
         let config = self.config.clone();
         let sender = self.sender.clone();
         let is_running = Arc::clone(&self.is_running);
+        let persistence = self.persistence.clone();
 
         tokio::spawn(async move {
             let mut flush_interval = interval(config.flush_interval);
@@ -320,10 +484,28 @@ impl EventQueue {
                                 std::mem::take(&mut state.events)
                             };
                             if !events.is_empty() {
-                                let _ = sender(events).await;
+                                let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
+                                if sender(events).await.is_ok() {
+                                    // Mark as sent in persistence
+                                    if let Some(ref p) = persistence {
+                                        let _ = p.lock().mark_sent(&event_ids);
+                                    }
+                                }
                             }
                         }
+                        // Final persistence flush
+                        if let Some(ref p) = persistence {
+                            let _ = p.lock().flush();
+                        }
                         break;
+                    }
+                    Some(event_ids) = sent_events_rx.recv() => {
+                        // Mark events as sent in persistence
+                        if let Some(ref p) = persistence {
+                            if let Err(e) = p.lock().mark_sent(&event_ids) {
+                                tracing::warn!("Failed to mark events as sent: {}", e);
+                            }
+                        }
                     }
                     _ = flush_rx.recv() => {
                         // Manual flush request
@@ -333,6 +515,7 @@ impl EventQueue {
                                 std::mem::take(&mut state.events)
                             };
                             if !events.is_empty() {
+                                let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
                                 if let Err(e) = sender(events.clone()).await {
                                     tracing::warn!("Failed to flush events: {}", e);
                                     // Re-queue failed events
@@ -340,6 +523,11 @@ impl EventQueue {
                                     let available_space = config.max_queue_size.saturating_sub(state.events.len());
                                     let to_requeue: Vec<_> = events.into_iter().take(available_space).collect();
                                     state.events.splice(0..0, to_requeue);
+                                } else {
+                                    // Mark as sent in persistence
+                                    if let Some(ref p) = persistence {
+                                        let _ = p.lock().mark_sent(&event_ids);
+                                    }
                                 }
                             }
                         }
@@ -355,6 +543,7 @@ impl EventQueue {
                                 std::mem::take(&mut state.events)
                             };
                             if !events.is_empty() {
+                                let event_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
                                 if let Err(e) = sender(events.clone()).await {
                                     tracing::warn!("Failed to send events: {}", e);
                                     // Re-queue failed events
@@ -362,6 +551,11 @@ impl EventQueue {
                                     let available_space = config.max_queue_size.saturating_sub(state.events.len());
                                     let to_requeue: Vec<_> = events.into_iter().take(available_space).collect();
                                     state.events.splice(0..0, to_requeue);
+                                } else {
+                                    // Mark as sent in persistence
+                                    if let Some(ref p) = persistence {
+                                        let _ = p.lock().mark_sent(&event_ids);
+                                    }
                                 }
                             }
                         }
@@ -421,6 +615,15 @@ impl EventQueue {
 
     /// Add an event to the queue.
     fn add_event(&self, event: Event) {
+        // Persist event BEFORE queuing (crash-safe)
+        if let Some(ref persistence) = self.persistence {
+            let persisted = event.to_persisted();
+            if let Err(e) = persistence.lock().persist(&persisted) {
+                tracing::warn!("Failed to persist event: {}", e);
+                // Continue anyway - event will still be queued in memory
+            }
+        }
+
         let should_flush = {
             let mut state = self.state.lock();
 
@@ -484,11 +687,35 @@ impl EventQueue {
     pub fn is_running(&self) -> bool {
         self.is_running.load(Ordering::SeqCst)
     }
+
+    /// Check if persistence is enabled.
+    pub fn is_persistence_enabled(&self) -> bool {
+        self.persistence.is_some()
+    }
+
+    /// Get the persistence instance (for testing and advanced use).
+    pub fn persistence(&self) -> Option<&Arc<Mutex<EventPersistence>>> {
+        self.persistence.as_ref()
+    }
+
+    /// Cleanup old persisted events.
+    ///
+    /// This removes events that have been successfully sent.
+    pub fn cleanup_persistence(&self) -> Result<()> {
+        if let Some(ref persistence) = self.persistence {
+            persistence.lock().cleanup()?;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for EventQueue {
     fn drop(&mut self) {
         self.is_running.store(false, Ordering::SeqCst);
+        // Try to flush persistence on drop
+        if let Some(ref persistence) = self.persistence {
+            let _ = persistence.lock().flush();
+        }
     }
 }
 
