@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{ErrorCode, FlagKitError, Result};
+use crate::event_persistence::{DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_MAX_PERSISTED_EVENTS};
 
 pub const DEFAULT_POLLING_INTERVAL: Duration = Duration::from_secs(30);
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -29,6 +31,14 @@ pub struct FlagKitOptions {
     pub circuit_breaker_reset_timeout: Duration,
     pub bootstrap: Option<HashMap<String, serde_json::Value>>,
     pub local_port: Option<u16>,
+    /// Enable crash-resilient event persistence.
+    pub persist_events: bool,
+    /// Directory path for event storage.
+    pub event_storage_path: Option<PathBuf>,
+    /// Maximum number of events to persist.
+    pub max_persisted_events: usize,
+    /// Interval between persistence flushes to disk.
+    pub persistence_flush_interval: Duration,
 }
 
 impl FlagKitOptions {
@@ -48,6 +58,10 @@ impl FlagKitOptions {
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
             local_port: None,
+            persist_events: false,
+            event_storage_path: None,
+            max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
+            persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
         }
     }
 
@@ -104,6 +118,10 @@ pub struct FlagKitOptionsBuilder {
     circuit_breaker_reset_timeout: Duration,
     bootstrap: Option<HashMap<String, serde_json::Value>>,
     local_port: Option<u16>,
+    persist_events: bool,
+    event_storage_path: Option<PathBuf>,
+    max_persisted_events: usize,
+    persistence_flush_interval: Duration,
 }
 
 impl FlagKitOptionsBuilder {
@@ -123,6 +141,10 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
             local_port: None,
+            persist_events: false,
+            event_storage_path: None,
+            max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
+            persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
         }
     }
 
@@ -191,6 +213,30 @@ impl FlagKitOptionsBuilder {
         self
     }
 
+    /// Enable crash-resilient event persistence.
+    pub fn persist_events(mut self, enabled: bool) -> Self {
+        self.persist_events = enabled;
+        self
+    }
+
+    /// Set the directory path for event storage.
+    pub fn event_storage_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.event_storage_path = Some(path.into());
+        self
+    }
+
+    /// Set the maximum number of events to persist.
+    pub fn max_persisted_events(mut self, max: usize) -> Self {
+        self.max_persisted_events = max;
+        self
+    }
+
+    /// Set the interval between persistence flushes to disk.
+    pub fn persistence_flush_interval(mut self, interval: Duration) -> Self {
+        self.persistence_flush_interval = interval;
+        self
+    }
+
     pub fn build(self) -> FlagKitOptions {
         FlagKitOptions {
             api_key: self.api_key,
@@ -207,6 +253,10 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_reset_timeout: self.circuit_breaker_reset_timeout,
             bootstrap: self.bootstrap,
             local_port: self.local_port,
+            persist_events: self.persist_events,
+            event_storage_path: self.event_storage_path,
+            max_persisted_events: self.max_persisted_events,
+            persistence_flush_interval: self.persistence_flush_interval,
         }
     }
 }
