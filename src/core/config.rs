@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::error::sanitizer::ErrorSanitizationConfig;
 use crate::error::{ErrorCode, FlagKitError, Result};
 use crate::event_persistence::{DEFAULT_FLUSH_INTERVAL_MS, DEFAULT_MAX_PERSISTED_EVENTS};
 
@@ -190,6 +191,8 @@ pub struct FlagKitOptions {
     pub evaluation_jitter: EvaluationJitterConfig,
     /// Configuration for bootstrap value verification.
     pub bootstrap_verification: BootstrapVerificationConfig,
+    /// Configuration for error message sanitization.
+    pub error_sanitization: ErrorSanitizationConfig,
 }
 
 impl FlagKitOptions {
@@ -216,6 +219,7 @@ impl FlagKitOptions {
             persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
             evaluation_jitter: EvaluationJitterConfig::default(),
             bootstrap_verification: BootstrapVerificationConfig::default(),
+            error_sanitization: ErrorSanitizationConfig::default(),
         }
     }
 
@@ -279,6 +283,7 @@ pub struct FlagKitOptionsBuilder {
     persistence_flush_interval: Duration,
     evaluation_jitter: EvaluationJitterConfig,
     bootstrap_verification: BootstrapVerificationConfig,
+    error_sanitization: ErrorSanitizationConfig,
 }
 
 impl FlagKitOptionsBuilder {
@@ -305,6 +310,7 @@ impl FlagKitOptionsBuilder {
             persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
             evaluation_jitter: EvaluationJitterConfig::default(),
             bootstrap_verification: BootstrapVerificationConfig::default(),
+            error_sanitization: ErrorSanitizationConfig::default(),
         }
     }
 
@@ -432,6 +438,24 @@ impl FlagKitOptionsBuilder {
         self
     }
 
+    /// Set the error sanitization configuration.
+    pub fn error_sanitization(mut self, config: ErrorSanitizationConfig) -> Self {
+        self.error_sanitization = config;
+        self
+    }
+
+    /// Disable error message sanitization.
+    pub fn disable_error_sanitization(mut self) -> Self {
+        self.error_sanitization = ErrorSanitizationConfig::disabled();
+        self
+    }
+
+    /// Enable error sanitization with original message preservation.
+    pub fn error_sanitization_with_preservation(mut self) -> Self {
+        self.error_sanitization = ErrorSanitizationConfig::with_preservation();
+        self
+    }
+
     pub fn build(self) -> FlagKitOptions {
         FlagKitOptions {
             api_key: self.api_key,
@@ -455,6 +479,7 @@ impl FlagKitOptionsBuilder {
             persistence_flush_interval: self.persistence_flush_interval,
             evaluation_jitter: self.evaluation_jitter,
             bootstrap_verification: self.bootstrap_verification,
+            error_sanitization: self.error_sanitization,
         }
     }
 }
@@ -662,5 +687,51 @@ mod tests {
 
         assert!(options.bootstrap_verification.enabled);
         assert_eq!(options.bootstrap_verification.on_failure, "error");
+    }
+
+    // === Error Sanitization Config Tests ===
+
+    #[test]
+    fn test_options_error_sanitization_default() {
+        let options = FlagKitOptions::new("sdk_test_key");
+        assert!(options.error_sanitization.enabled);
+        assert!(!options.error_sanitization.preserve_original);
+    }
+
+    #[test]
+    fn test_options_builder_error_sanitization_default() {
+        let options = FlagKitOptions::builder("sdk_test_key").build();
+        assert!(options.error_sanitization.enabled);
+        assert!(!options.error_sanitization.preserve_original);
+    }
+
+    #[test]
+    fn test_options_builder_disable_error_sanitization() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .disable_error_sanitization()
+            .build();
+        assert!(!options.error_sanitization.enabled);
+    }
+
+    #[test]
+    fn test_options_builder_error_sanitization_with_preservation() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .error_sanitization_with_preservation()
+            .build();
+        assert!(options.error_sanitization.enabled);
+        assert!(options.error_sanitization.preserve_original);
+    }
+
+    #[test]
+    fn test_options_builder_error_sanitization_custom() {
+        let config = ErrorSanitizationConfig {
+            enabled: true,
+            preserve_original: true,
+        };
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .error_sanitization(config)
+            .build();
+        assert!(options.error_sanitization.enabled);
+        assert!(options.error_sanitization.preserve_original);
     }
 }
