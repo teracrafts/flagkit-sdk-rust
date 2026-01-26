@@ -4,10 +4,12 @@
 
 use chrono::Utc;
 use parking_lot::RwLock;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::core::{
     ContextManager, EventQueue, EventQueueConfig, FlagCache, FlagKitOptions, PollCallback,
@@ -315,10 +317,29 @@ impl FlagKitClient {
         self.event_queue.read().track("context.reset", None);
     }
 
+    // === Evaluation Jitter (Timing Attack Protection) ===
+
+    /// Apply evaluation jitter to protect against cache timing attacks.
+    ///
+    /// When enabled, this adds a random delay before flag evaluation to prevent
+    /// attackers from inferring information about flag values based on response times.
+    fn apply_evaluation_jitter(&self) {
+        let jitter_config = &self.options.evaluation_jitter;
+        if !jitter_config.enabled {
+            return;
+        }
+
+        let jitter_ms = rand::thread_rng().gen_range(jitter_config.min_ms..=jitter_config.max_ms);
+        std::thread::sleep(Duration::from_millis(jitter_ms));
+    }
+
     // === Flag Evaluation ===
 
     /// Evaluate a flag and return the full result.
     pub fn evaluate(&self, flag_key: &str, context: Option<&EvaluationContext>) -> EvaluationResult {
+        // Apply jitter to protect against timing attacks
+        self.apply_evaluation_jitter();
+
         let _merged_context = self.context_manager.get_merged_context(context);
         let flag = self.cache.get(flag_key);
 
@@ -839,5 +860,133 @@ mod tests {
         // Events should be queued
         let queue_size = client.event_queue.read().queue_size();
         assert!(queue_size >= 2);
+    }
+
+    // === Evaluation Jitter Tests ===
+
+    #[test]
+    fn test_jitter_disabled_by_default() {
+        use std::time::Instant;
+
+        let mut bootstrap = HashMap::new();
+        bootstrap.insert("test-flag".to_string(), serde_json::json!(true));
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap(bootstrap)
+            .build();
+
+        // Verify jitter is disabled by default
+        assert!(!options.evaluation_jitter.enabled);
+
+        let client = FlagKitClient::new(options).unwrap();
+
+        // Measure evaluation time - should be very fast without jitter
+        let start = Instant::now();
+        let _ = client.get_boolean_value("test-flag", false, None);
+        let elapsed = start.elapsed();
+
+        // Without jitter, evaluation should complete in well under 5ms
+        // Using 3ms as a conservative upper bound for cache lookup
+        assert!(
+            elapsed.as_millis() < 3,
+            "Evaluation took {}ms, expected < 3ms without jitter",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_jitter_applied_when_enabled() {
+        use crate::core::EvaluationJitterConfig;
+        use std::time::Instant;
+
+        let mut bootstrap = HashMap::new();
+        bootstrap.insert("test-flag".to_string(), serde_json::json!(true));
+
+        let jitter_config = EvaluationJitterConfig {
+            enabled: true,
+            min_ms: 10,
+            max_ms: 20,
+        };
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap(bootstrap)
+            .evaluation_jitter(jitter_config)
+            .build();
+
+        let client = FlagKitClient::new(options).unwrap();
+
+        // Measure evaluation time - should include jitter delay
+        let start = Instant::now();
+        let _ = client.get_boolean_value("test-flag", false, None);
+        let elapsed = start.elapsed();
+
+        // With jitter enabled (min 10ms), evaluation should take at least 10ms
+        assert!(
+            elapsed.as_millis() >= 10,
+            "Evaluation took {}ms, expected >= 10ms with jitter enabled",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_jitter_timing_within_range() {
+        use crate::core::EvaluationJitterConfig;
+        use std::time::Instant;
+
+        let mut bootstrap = HashMap::new();
+        bootstrap.insert("test-flag".to_string(), serde_json::json!(true));
+
+        let min_ms = 15;
+        let max_ms = 25;
+        let jitter_config = EvaluationJitterConfig {
+            enabled: true,
+            min_ms,
+            max_ms,
+        };
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap(bootstrap)
+            .evaluation_jitter(jitter_config)
+            .build();
+
+        let client = FlagKitClient::new(options).unwrap();
+
+        // Run multiple evaluations to test the range
+        for _ in 0..5 {
+            let start = Instant::now();
+            let _ = client.get_boolean_value("test-flag", false, None);
+            let elapsed = start.elapsed();
+
+            // Allow some tolerance for sleep inaccuracy (OS scheduling, etc.)
+            // The timing should be at least min_ms and reasonably close to max_ms
+            assert!(
+                elapsed.as_millis() >= min_ms as u128,
+                "Evaluation took {}ms, expected >= {}ms",
+                elapsed.as_millis(),
+                min_ms
+            );
+            // Upper bound with some tolerance for OS scheduling jitter
+            assert!(
+                elapsed.as_millis() <= (max_ms + 10) as u128,
+                "Evaluation took {}ms, expected <= {}ms (with 10ms tolerance)",
+                elapsed.as_millis(),
+                max_ms + 10
+            );
+        }
+    }
+
+    #[test]
+    fn test_enable_evaluation_jitter_builder() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .enable_evaluation_jitter()
+            .build();
+
+        assert!(options.evaluation_jitter.enabled);
+        assert_eq!(options.evaluation_jitter.min_ms, 5);
+        assert_eq!(options.evaluation_jitter.max_ms, 15);
     }
 }

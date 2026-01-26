@@ -6,7 +6,7 @@ mod polling_manager;
 
 pub use cache::{Cache, FlagCache};
 pub use config::{
-    FlagKitOptions, FlagKitOptionsBuilder, DEFAULT_CACHE_TTL,
+    EvaluationJitterConfig, FlagKitOptions, FlagKitOptionsBuilder, DEFAULT_CACHE_TTL,
     DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT, DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
     DEFAULT_EVENT_BATCH_SIZE, DEFAULT_EVENT_FLUSH_INTERVAL, DEFAULT_MAX_CACHE_SIZE,
     DEFAULT_POLLING_INTERVAL, DEFAULT_RETRY_ATTEMPTS, DEFAULT_TIMEOUT,

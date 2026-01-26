@@ -15,6 +15,49 @@ pub const DEFAULT_RETRY_ATTEMPTS: u32 = 3;
 pub const DEFAULT_CIRCUIT_BREAKER_THRESHOLD: u32 = 5;
 pub const DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Configuration for evaluation jitter to protect against cache timing attacks.
+///
+/// When enabled, a random delay is added before each flag evaluation to prevent
+/// attackers from inferring information about flag values based on response times.
+#[derive(Debug, Clone)]
+pub struct EvaluationJitterConfig {
+    /// Whether evaluation jitter is enabled. Defaults to false.
+    pub enabled: bool,
+    /// Minimum jitter delay in milliseconds. Defaults to 5ms.
+    pub min_ms: u64,
+    /// Maximum jitter delay in milliseconds. Defaults to 15ms.
+    pub max_ms: u64,
+}
+
+impl Default for EvaluationJitterConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_ms: 5,
+            max_ms: 15,
+        }
+    }
+}
+
+impl EvaluationJitterConfig {
+    /// Create a new jitter config with specified values.
+    pub fn new(enabled: bool, min_ms: u64, max_ms: u64) -> Self {
+        Self {
+            enabled,
+            min_ms,
+            max_ms,
+        }
+    }
+
+    /// Create an enabled jitter config with default timing values.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FlagKitOptions {
     pub api_key: String,
@@ -39,6 +82,8 @@ pub struct FlagKitOptions {
     pub max_persisted_events: usize,
     /// Interval between persistence flushes to disk.
     pub persistence_flush_interval: Duration,
+    /// Configuration for evaluation jitter (timing attack protection).
+    pub evaluation_jitter: EvaluationJitterConfig,
 }
 
 impl FlagKitOptions {
@@ -62,6 +107,7 @@ impl FlagKitOptions {
             event_storage_path: None,
             max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
             persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
+            evaluation_jitter: EvaluationJitterConfig::default(),
         }
     }
 
@@ -122,6 +168,7 @@ pub struct FlagKitOptionsBuilder {
     event_storage_path: Option<PathBuf>,
     max_persisted_events: usize,
     persistence_flush_interval: Duration,
+    evaluation_jitter: EvaluationJitterConfig,
 }
 
 impl FlagKitOptionsBuilder {
@@ -145,6 +192,7 @@ impl FlagKitOptionsBuilder {
             event_storage_path: None,
             max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
             persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
+            evaluation_jitter: EvaluationJitterConfig::default(),
         }
     }
 
@@ -237,6 +285,18 @@ impl FlagKitOptionsBuilder {
         self
     }
 
+    /// Set the evaluation jitter configuration for timing attack protection.
+    pub fn evaluation_jitter(mut self, config: EvaluationJitterConfig) -> Self {
+        self.evaluation_jitter = config;
+        self
+    }
+
+    /// Enable evaluation jitter with default timing values.
+    pub fn enable_evaluation_jitter(mut self) -> Self {
+        self.evaluation_jitter = EvaluationJitterConfig::enabled();
+        self
+    }
+
     pub fn build(self) -> FlagKitOptions {
         FlagKitOptions {
             api_key: self.api_key,
@@ -257,6 +317,7 @@ impl FlagKitOptionsBuilder {
             event_storage_path: self.event_storage_path,
             max_persisted_events: self.max_persisted_events,
             persistence_flush_interval: self.persistence_flush_interval,
+            evaluation_jitter: self.evaluation_jitter,
         }
     }
 }
@@ -283,5 +344,66 @@ mod tests {
             .local_port(8200)
             .build();
         assert_eq!(options.local_port, Some(8200));
+    }
+
+    // === Evaluation Jitter Config Tests ===
+
+    #[test]
+    fn test_evaluation_jitter_default() {
+        let config = EvaluationJitterConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.min_ms, 5);
+        assert_eq!(config.max_ms, 15);
+    }
+
+    #[test]
+    fn test_evaluation_jitter_enabled() {
+        let config = EvaluationJitterConfig::enabled();
+        assert!(config.enabled);
+        assert_eq!(config.min_ms, 5);
+        assert_eq!(config.max_ms, 15);
+    }
+
+    #[test]
+    fn test_evaluation_jitter_new() {
+        let config = EvaluationJitterConfig::new(true, 10, 20);
+        assert!(config.enabled);
+        assert_eq!(config.min_ms, 10);
+        assert_eq!(config.max_ms, 20);
+    }
+
+    #[test]
+    fn test_options_evaluation_jitter_default() {
+        let options = FlagKitOptions::new("sdk_test_key");
+        assert!(!options.evaluation_jitter.enabled);
+        assert_eq!(options.evaluation_jitter.min_ms, 5);
+        assert_eq!(options.evaluation_jitter.max_ms, 15);
+    }
+
+    #[test]
+    fn test_options_builder_evaluation_jitter_default() {
+        let options = FlagKitOptions::builder("sdk_test_key").build();
+        assert!(!options.evaluation_jitter.enabled);
+    }
+
+    #[test]
+    fn test_options_builder_evaluation_jitter_custom() {
+        let jitter_config = EvaluationJitterConfig::new(true, 20, 50);
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .evaluation_jitter(jitter_config)
+            .build();
+        assert!(options.evaluation_jitter.enabled);
+        assert_eq!(options.evaluation_jitter.min_ms, 20);
+        assert_eq!(options.evaluation_jitter.max_ms, 50);
+    }
+
+    #[test]
+    fn test_options_builder_enable_evaluation_jitter() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .enable_evaluation_jitter()
+            .build();
+        assert!(options.evaluation_jitter.enabled);
+        assert_eq!(options.evaluation_jitter.min_ms, 5);
+        assert_eq!(options.evaluation_jitter.max_ms, 15);
     }
 }
