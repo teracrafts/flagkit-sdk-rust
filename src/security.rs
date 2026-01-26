@@ -1431,8 +1431,8 @@ pub fn verify_bootstrap_with_policy(
             match config.on_failure.as_str() {
                 "ignore" => BootstrapVerificationResult::Skipped,
                 "error" => BootstrapVerificationResult::Failed(msg),
-                "warn" | _ => {
-                    // Log warning (using tracing)
+                _ => {
+                    // "warn" or any other value - log warning (using tracing)
                     tracing::warn!("[FlagKit Security] Bootstrap verification failed: {}", msg);
                     BootstrapVerificationResult::Skipped
                 }
