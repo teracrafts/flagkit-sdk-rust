@@ -85,6 +85,8 @@ pub enum ErrorCode {
     SecurityPiiDetected,
     SecuritySignatureError,
     SecurityKeyRotationFailed,
+    SecurityBootstrapVerificationFailed,
+    SecurityBootstrapExpired,
 }
 
 impl ErrorCode {
@@ -152,6 +154,8 @@ impl ErrorCode {
             ErrorCode::SecurityPiiDetected => "SECURITY_PII_DETECTED",
             ErrorCode::SecuritySignatureError => "SECURITY_SIGNATURE_ERROR",
             ErrorCode::SecurityKeyRotationFailed => "SECURITY_KEY_ROTATION_FAILED",
+            ErrorCode::SecurityBootstrapVerificationFailed => "SECURITY_BOOTSTRAP_VERIFICATION_FAILED",
+            ErrorCode::SecurityBootstrapExpired => "SECURITY_BOOTSTRAP_EXPIRED",
         }
     }
 

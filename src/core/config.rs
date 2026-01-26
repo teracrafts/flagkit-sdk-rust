@@ -58,6 +58,108 @@ impl EvaluationJitterConfig {
     }
 }
 
+/// Bootstrap configuration with optional signature verification.
+///
+/// This struct supports loading bootstrap flag values with HMAC-SHA256 signature
+/// verification to ensure the values have not been tampered with.
+#[derive(Debug, Clone)]
+pub struct BootstrapConfig {
+    /// The bootstrap flag values.
+    pub flags: HashMap<String, serde_json::Value>,
+    /// Optional HMAC-SHA256 signature of the flags.
+    pub signature: Option<String>,
+    /// Optional timestamp (milliseconds since epoch) when the bootstrap was created.
+    pub timestamp: Option<i64>,
+}
+
+impl BootstrapConfig {
+    /// Create a new bootstrap config with flags only (legacy format).
+    pub fn new(flags: HashMap<String, serde_json::Value>) -> Self {
+        Self {
+            flags,
+            signature: None,
+            timestamp: None,
+        }
+    }
+
+    /// Create a bootstrap config with signature and timestamp for verification.
+    pub fn with_signature(
+        flags: HashMap<String, serde_json::Value>,
+        signature: String,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            flags,
+            signature: Some(signature),
+            timestamp: Some(timestamp),
+        }
+    }
+}
+
+impl From<HashMap<String, serde_json::Value>> for BootstrapConfig {
+    fn from(flags: HashMap<String, serde_json::Value>) -> Self {
+        Self::new(flags)
+    }
+}
+
+/// Configuration for bootstrap value verification.
+///
+/// When enabled, the SDK will verify the HMAC-SHA256 signature of bootstrap
+/// values to ensure they have not been tampered with.
+#[derive(Debug, Clone)]
+pub struct BootstrapVerificationConfig {
+    /// Whether bootstrap signature verification is enabled. Defaults to true.
+    pub enabled: bool,
+    /// Maximum age of bootstrap values in milliseconds. Defaults to 24 hours (86400000ms).
+    pub max_age: u64,
+    /// Action to take on verification failure: "warn", "error", or "ignore". Defaults to "warn".
+    pub on_failure: String,
+}
+
+impl Default for BootstrapVerificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_age: 86400000, // 24 hours in milliseconds
+            on_failure: "warn".to_string(),
+        }
+    }
+}
+
+impl BootstrapVerificationConfig {
+    /// Create a new verification config with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a verification config with custom values.
+    pub fn custom(enabled: bool, max_age: u64, on_failure: impl Into<String>) -> Self {
+        Self {
+            enabled,
+            max_age,
+            on_failure: on_failure.into(),
+        }
+    }
+
+    /// Create a config that errors on verification failure.
+    pub fn strict() -> Self {
+        Self {
+            enabled: true,
+            max_age: 86400000,
+            on_failure: "error".to_string(),
+        }
+    }
+
+    /// Create a config that ignores verification failures.
+    pub fn permissive() -> Self {
+        Self {
+            enabled: false,
+            max_age: 86400000,
+            on_failure: "ignore".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FlagKitOptions {
     pub api_key: String,
@@ -73,6 +175,8 @@ pub struct FlagKitOptions {
     pub circuit_breaker_threshold: u32,
     pub circuit_breaker_reset_timeout: Duration,
     pub bootstrap: Option<HashMap<String, serde_json::Value>>,
+    /// Bootstrap configuration with optional signature for verification.
+    pub bootstrap_config: Option<BootstrapConfig>,
     pub local_port: Option<u16>,
     /// Enable crash-resilient event persistence.
     pub persist_events: bool,
@@ -84,6 +188,8 @@ pub struct FlagKitOptions {
     pub persistence_flush_interval: Duration,
     /// Configuration for evaluation jitter (timing attack protection).
     pub evaluation_jitter: EvaluationJitterConfig,
+    /// Configuration for bootstrap value verification.
+    pub bootstrap_verification: BootstrapVerificationConfig,
 }
 
 impl FlagKitOptions {
@@ -102,12 +208,14 @@ impl FlagKitOptions {
             circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
+            bootstrap_config: None,
             local_port: None,
             persist_events: false,
             event_storage_path: None,
             max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
             persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
             evaluation_jitter: EvaluationJitterConfig::default(),
+            bootstrap_verification: BootstrapVerificationConfig::default(),
         }
     }
 
@@ -163,12 +271,14 @@ pub struct FlagKitOptionsBuilder {
     circuit_breaker_threshold: u32,
     circuit_breaker_reset_timeout: Duration,
     bootstrap: Option<HashMap<String, serde_json::Value>>,
+    bootstrap_config: Option<BootstrapConfig>,
     local_port: Option<u16>,
     persist_events: bool,
     event_storage_path: Option<PathBuf>,
     max_persisted_events: usize,
     persistence_flush_interval: Duration,
     evaluation_jitter: EvaluationJitterConfig,
+    bootstrap_verification: BootstrapVerificationConfig,
 }
 
 impl FlagKitOptionsBuilder {
@@ -187,12 +297,14 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_threshold: DEFAULT_CIRCUIT_BREAKER_THRESHOLD,
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
+            bootstrap_config: None,
             local_port: None,
             persist_events: false,
             event_storage_path: None,
             max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
             persistence_flush_interval: Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS),
             evaluation_jitter: EvaluationJitterConfig::default(),
+            bootstrap_verification: BootstrapVerificationConfig::default(),
         }
     }
 
@@ -256,6 +368,29 @@ impl FlagKitOptionsBuilder {
         self
     }
 
+    /// Set the bootstrap configuration with optional signature verification.
+    pub fn bootstrap_config(mut self, config: BootstrapConfig) -> Self {
+        self.bootstrap_config = Some(config);
+        self
+    }
+
+    /// Set bootstrap data with signature for verification.
+    pub fn bootstrap_with_signature(
+        mut self,
+        flags: HashMap<String, serde_json::Value>,
+        signature: String,
+        timestamp: i64,
+    ) -> Self {
+        self.bootstrap_config = Some(BootstrapConfig::with_signature(flags, signature, timestamp));
+        self
+    }
+
+    /// Set the bootstrap verification configuration.
+    pub fn bootstrap_verification(mut self, config: BootstrapVerificationConfig) -> Self {
+        self.bootstrap_verification = config;
+        self
+    }
+
     pub fn local_port(mut self, port: u16) -> Self {
         self.local_port = Some(port);
         self
@@ -312,12 +447,14 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_threshold: self.circuit_breaker_threshold,
             circuit_breaker_reset_timeout: self.circuit_breaker_reset_timeout,
             bootstrap: self.bootstrap,
+            bootstrap_config: self.bootstrap_config,
             local_port: self.local_port,
             persist_events: self.persist_events,
             event_storage_path: self.event_storage_path,
             max_persisted_events: self.max_persisted_events,
             persistence_flush_interval: self.persistence_flush_interval,
             evaluation_jitter: self.evaluation_jitter,
+            bootstrap_verification: self.bootstrap_verification,
         }
     }
 }
@@ -405,5 +542,125 @@ mod tests {
         assert!(options.evaluation_jitter.enabled);
         assert_eq!(options.evaluation_jitter.min_ms, 5);
         assert_eq!(options.evaluation_jitter.max_ms, 15);
+    }
+
+    // === Bootstrap Config Tests ===
+
+    #[test]
+    fn test_bootstrap_config_new() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let config = BootstrapConfig::new(flags.clone());
+        assert_eq!(config.flags.len(), 1);
+        assert!(config.signature.is_none());
+        assert!(config.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_bootstrap_config_with_signature() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let config = BootstrapConfig::with_signature(
+            flags.clone(),
+            "test_signature".to_string(),
+            1700000000000,
+        );
+        assert_eq!(config.flags.len(), 1);
+        assert_eq!(config.signature, Some("test_signature".to_string()));
+        assert_eq!(config.timestamp, Some(1700000000000));
+    }
+
+    #[test]
+    fn test_bootstrap_config_from_hashmap() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let config: BootstrapConfig = flags.into();
+        assert_eq!(config.flags.len(), 1);
+        assert!(config.signature.is_none());
+    }
+
+    // === Bootstrap Verification Config Tests ===
+
+    #[test]
+    fn test_bootstrap_verification_config_default() {
+        let config = BootstrapVerificationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_age, 86400000);
+        assert_eq!(config.on_failure, "warn");
+    }
+
+    #[test]
+    fn test_bootstrap_verification_config_strict() {
+        let config = BootstrapVerificationConfig::strict();
+        assert!(config.enabled);
+        assert_eq!(config.on_failure, "error");
+    }
+
+    #[test]
+    fn test_bootstrap_verification_config_permissive() {
+        let config = BootstrapVerificationConfig::permissive();
+        assert!(!config.enabled);
+        assert_eq!(config.on_failure, "ignore");
+    }
+
+    #[test]
+    fn test_bootstrap_verification_config_custom() {
+        let config = BootstrapVerificationConfig::custom(true, 3600000, "error");
+        assert!(config.enabled);
+        assert_eq!(config.max_age, 3600000);
+        assert_eq!(config.on_failure, "error");
+    }
+
+    #[test]
+    fn test_options_bootstrap_verification_default() {
+        let options = FlagKitOptions::new("sdk_test_key");
+        assert!(options.bootstrap_verification.enabled);
+        assert_eq!(options.bootstrap_verification.on_failure, "warn");
+    }
+
+    #[test]
+    fn test_options_builder_bootstrap_config() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap_config = BootstrapConfig::new(flags);
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .bootstrap_config(bootstrap_config)
+            .build();
+
+        assert!(options.bootstrap_config.is_some());
+        let config = options.bootstrap_config.unwrap();
+        assert_eq!(config.flags.len(), 1);
+    }
+
+    #[test]
+    fn test_options_builder_bootstrap_with_signature() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .bootstrap_with_signature(flags, "sig".to_string(), 12345)
+            .build();
+
+        assert!(options.bootstrap_config.is_some());
+        let config = options.bootstrap_config.unwrap();
+        assert_eq!(config.signature, Some("sig".to_string()));
+        assert_eq!(config.timestamp, Some(12345));
+    }
+
+    #[test]
+    fn test_options_builder_bootstrap_verification() {
+        let verification = BootstrapVerificationConfig::strict();
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .bootstrap_verification(verification)
+            .build();
+
+        assert!(options.bootstrap_verification.enabled);
+        assert_eq!(options.bootstrap_verification.on_failure, "error");
     }
 }

@@ -1162,6 +1162,285 @@ fn getrandom(dest: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+// =============================================================================
+// Bootstrap Value Verification
+// =============================================================================
+
+use crate::core::{BootstrapConfig, BootstrapVerificationConfig};
+use std::collections::HashMap;
+
+/// Canonicalize a JSON object for signing.
+///
+/// Creates a deterministic string representation of the object by:
+/// 1. Sorting keys alphabetically
+/// 2. Converting to compact JSON format
+///
+/// # Arguments
+///
+/// * `obj` - The HashMap to canonicalize
+///
+/// # Returns
+///
+/// * `Ok(String)` - The canonical JSON string
+/// * `Err(String)` - If serialization fails
+///
+/// # Examples
+///
+/// ```
+/// use flagkit::security::canonicalize_object;
+/// use std::collections::HashMap;
+///
+/// let mut obj = HashMap::new();
+/// obj.insert("b".to_string(), serde_json::json!(2));
+/// obj.insert("a".to_string(), serde_json::json!(1));
+///
+/// let canonical = canonicalize_object(&obj).unwrap();
+/// assert_eq!(canonical, r#"{"a":1,"b":2}"#);
+/// ```
+pub fn canonicalize_object(obj: &HashMap<String, serde_json::Value>) -> std::result::Result<String, String> {
+    // Create a sorted BTreeMap for deterministic key ordering
+    let sorted: std::collections::BTreeMap<_, _> = obj.iter().collect();
+
+    // Serialize with compact formatting
+    serde_json::to_string(&sorted)
+        .map_err(|e| format!("Failed to canonicalize object: {}", e))
+}
+
+/// Verify the HMAC-SHA256 signature of bootstrap values.
+///
+/// This function verifies that:
+/// 1. The signature is valid (matches the expected HMAC-SHA256)
+/// 2. The timestamp is not too old (if max_age is configured)
+///
+/// # Arguments
+///
+/// * `bootstrap` - The bootstrap configuration with flags, signature, and timestamp
+/// * `api_key` - The API key used for HMAC signing
+/// * `config` - The verification configuration
+///
+/// # Returns
+///
+/// * `Ok(())` - Verification passed
+/// * `Err(String)` - Verification failed with error message
+///
+/// # Examples
+///
+/// ```no_run
+/// use flagkit::security::verify_bootstrap_signature;
+/// use flagkit::{BootstrapConfig, BootstrapVerificationConfig};
+/// use std::collections::HashMap;
+///
+/// let flags = HashMap::new();
+/// let bootstrap = BootstrapConfig::with_signature(
+///     flags,
+///     "valid_signature".to_string(),
+///     chrono::Utc::now().timestamp_millis(),
+/// );
+/// let config = BootstrapVerificationConfig::default();
+///
+/// match verify_bootstrap_signature(&bootstrap, "sdk_api_key", &config) {
+///     Ok(()) => println!("Bootstrap verified!"),
+///     Err(msg) => println!("Verification failed: {}", msg),
+/// }
+/// ```
+pub fn verify_bootstrap_signature(
+    bootstrap: &BootstrapConfig,
+    api_key: &str,
+    config: &BootstrapVerificationConfig,
+) -> std::result::Result<(), String> {
+    // If verification is disabled, always pass
+    if !config.enabled {
+        return Ok(());
+    }
+
+    // Get the signature - if no signature present, skip verification
+    let signature = match &bootstrap.signature {
+        Some(sig) => sig,
+        None => return Ok(()), // No signature means legacy format, skip verification
+    };
+
+    // Check timestamp expiration if timestamp is provided
+    if let Some(timestamp) = bootstrap.timestamp {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("Failed to get current time: {}", e))?
+            .as_millis() as i64;
+
+        let age = now - timestamp;
+        if age < 0 {
+            return Err("Bootstrap timestamp is in the future".to_string());
+        }
+
+        if age > config.max_age as i64 {
+            return Err(format!(
+                "Bootstrap values have expired (age: {}ms, max: {}ms)",
+                age, config.max_age
+            ));
+        }
+    }
+
+    // Canonicalize the flags for signing
+    let canonical = canonicalize_object(&bootstrap.flags)?;
+
+    // Create the signing payload: timestamp.canonical_flags (if timestamp present)
+    // or just canonical_flags (if no timestamp)
+    let signing_payload = match bootstrap.timestamp {
+        Some(ts) => format!("{}.{}", ts, canonical),
+        None => canonical,
+    };
+
+    // Compute expected HMAC-SHA256
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(api_key.as_bytes())
+        .map_err(|e| format!("Failed to create HMAC: {}", e))?;
+
+    mac.update(signing_payload.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+
+    // Constant-time comparison to prevent timing attacks
+    if !constant_time_compare(&expected, signature) {
+        return Err("Invalid bootstrap signature".to_string());
+    }
+
+    Ok(())
+}
+
+/// Generate an HMAC-SHA256 signature for bootstrap values.
+///
+/// This function creates a signature that can be verified with `verify_bootstrap_signature`.
+///
+/// # Arguments
+///
+/// * `flags` - The bootstrap flag values
+/// * `api_key` - The API key used for HMAC signing
+/// * `timestamp` - The timestamp (milliseconds since epoch)
+///
+/// # Returns
+///
+/// The hex-encoded HMAC-SHA256 signature
+///
+/// # Examples
+///
+/// ```
+/// use flagkit::security::sign_bootstrap;
+/// use std::collections::HashMap;
+///
+/// let mut flags = HashMap::new();
+/// flags.insert("feature".to_string(), serde_json::json!(true));
+///
+/// let timestamp = chrono::Utc::now().timestamp_millis();
+/// let signature = sign_bootstrap(&flags, "sdk_api_key", timestamp).unwrap();
+/// ```
+pub fn sign_bootstrap(
+    flags: &HashMap<String, serde_json::Value>,
+    api_key: &str,
+    timestamp: i64,
+) -> std::result::Result<String, String> {
+    // Canonicalize the flags
+    let canonical = canonicalize_object(flags)?;
+
+    // Create the signing payload: timestamp.canonical_flags
+    let signing_payload = format!("{}.{}", timestamp, canonical);
+
+    // Compute HMAC-SHA256
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(api_key.as_bytes())
+        .map_err(|e| format!("Failed to create HMAC: {}", e))?;
+
+    mac.update(signing_payload.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+/// Constant-time string comparison to prevent timing attacks.
+fn constant_time_compare(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+
+    let mut result = 0u8;
+    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
+        result |= x ^ y;
+    }
+
+    result == 0
+}
+
+/// Result of bootstrap verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BootstrapVerificationResult {
+    /// Verification passed successfully.
+    Success,
+    /// Verification was skipped (disabled or no signature).
+    Skipped,
+    /// Verification failed with an error message.
+    Failed(String),
+}
+
+impl BootstrapVerificationResult {
+    /// Returns true if verification passed or was skipped.
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Self::Success | Self::Skipped)
+    }
+
+    /// Returns true if verification failed.
+    pub fn is_failed(&self) -> bool {
+        matches!(self, Self::Failed(_))
+    }
+
+    /// Returns the error message if verification failed.
+    pub fn error_message(&self) -> Option<&str> {
+        match self {
+            Self::Failed(msg) => Some(msg),
+            _ => None,
+        }
+    }
+}
+
+/// Verify bootstrap and handle failures according to configuration.
+///
+/// This function verifies bootstrap values and handles failures according to
+/// the `on_failure` setting in the configuration:
+/// - "error": Returns an error result
+/// - "warn": Logs a warning and returns success
+/// - "ignore": Silently returns success
+///
+/// # Arguments
+///
+/// * `bootstrap` - The bootstrap configuration
+/// * `api_key` - The API key used for verification
+/// * `config` - The verification configuration
+///
+/// # Returns
+///
+/// A `BootstrapVerificationResult` indicating the outcome
+pub fn verify_bootstrap_with_policy(
+    bootstrap: &BootstrapConfig,
+    api_key: &str,
+    config: &BootstrapVerificationConfig,
+) -> BootstrapVerificationResult {
+    match verify_bootstrap_signature(bootstrap, api_key, config) {
+        Ok(()) => {
+            if bootstrap.signature.is_some() {
+                BootstrapVerificationResult::Success
+            } else {
+                BootstrapVerificationResult::Skipped
+            }
+        }
+        Err(msg) => {
+            match config.on_failure.as_str() {
+                "ignore" => BootstrapVerificationResult::Skipped,
+                "error" => BootstrapVerificationResult::Failed(msg),
+                "warn" | _ => {
+                    // Log warning (using tracing)
+                    tracing::warn!("[FlagKit Security] Bootstrap verification failed: {}", msg);
+                    BootstrapVerificationResult::Skipped
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1801,5 +2080,282 @@ mod tests {
         assert_eq!(cache.decrypt(&encrypted1).unwrap(), plaintext);
         assert_eq!(cache.decrypt(&encrypted2).unwrap(), plaintext);
         assert_eq!(cache.decrypt(&encrypted3).unwrap(), plaintext);
+    }
+
+    // =============================================================================
+    // Bootstrap Verification Tests
+    // =============================================================================
+
+    #[test]
+    fn test_canonicalize_object_empty() {
+        let obj: HashMap<String, serde_json::Value> = HashMap::new();
+        let canonical = canonicalize_object(&obj).unwrap();
+        assert_eq!(canonical, "{}");
+    }
+
+    #[test]
+    fn test_canonicalize_object_sorted_keys() {
+        let mut obj = HashMap::new();
+        obj.insert("z".to_string(), serde_json::json!(3));
+        obj.insert("a".to_string(), serde_json::json!(1));
+        obj.insert("m".to_string(), serde_json::json!(2));
+
+        let canonical = canonicalize_object(&obj).unwrap();
+        assert_eq!(canonical, r#"{"a":1,"m":2,"z":3}"#);
+    }
+
+    #[test]
+    fn test_canonicalize_object_nested() {
+        let mut obj = HashMap::new();
+        obj.insert("feature".to_string(), serde_json::json!(true));
+        obj.insert("config".to_string(), serde_json::json!({"nested": "value"}));
+
+        let canonical = canonicalize_object(&obj).unwrap();
+        // Keys should be sorted alphabetically
+        assert!(canonical.starts_with(r#"{"config":"#));
+    }
+
+    #[test]
+    fn test_sign_bootstrap() {
+        let mut flags = HashMap::new();
+        flags.insert("feature-a".to_string(), serde_json::json!(true));
+        flags.insert("feature-b".to_string(), serde_json::json!("enabled"));
+
+        let timestamp = 1700000000000i64;
+        let signature = sign_bootstrap(&flags, "sdk_test_key", timestamp).unwrap();
+
+        assert!(!signature.is_empty());
+        assert_eq!(signature.len(), 64); // SHA256 hex is 64 characters
+    }
+
+    #[test]
+    fn test_verify_bootstrap_valid_signature() {
+        let mut flags = HashMap::new();
+        flags.insert("feature-a".to_string(), serde_json::json!(true));
+        flags.insert("feature-b".to_string(), serde_json::json!(false));
+
+        let api_key = "sdk_test_key";
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
+
+        let bootstrap = BootstrapConfig::with_signature(flags, signature, timestamp);
+        let config = BootstrapVerificationConfig::default();
+
+        let result = verify_bootstrap_signature(&bootstrap, api_key, &config);
+        assert!(result.is_ok(), "Expected valid signature to pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_verify_bootstrap_invalid_signature() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let bootstrap = BootstrapConfig::with_signature(
+            flags,
+            "invalid_signature_that_does_not_match".to_string(),
+            timestamp,
+        );
+        let config = BootstrapVerificationConfig::default();
+
+        let result = verify_bootstrap_signature(&bootstrap, "sdk_test_key", &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid bootstrap signature"));
+    }
+
+    #[test]
+    fn test_verify_bootstrap_expired_timestamp() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let api_key = "sdk_test_key";
+        // Timestamp from 2 days ago
+        let timestamp = chrono::Utc::now().timestamp_millis() - (2 * 24 * 60 * 60 * 1000);
+        let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
+
+        let bootstrap = BootstrapConfig::with_signature(flags, signature, timestamp);
+        let config = BootstrapVerificationConfig::default(); // default max_age is 24 hours
+
+        let result = verify_bootstrap_signature(&bootstrap, api_key, &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expired"));
+    }
+
+    #[test]
+    fn test_verify_bootstrap_future_timestamp() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let api_key = "sdk_test_key";
+        // Timestamp 1 hour in the future
+        let timestamp = chrono::Utc::now().timestamp_millis() + (60 * 60 * 1000);
+        let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
+
+        let bootstrap = BootstrapConfig::with_signature(flags, signature, timestamp);
+        let config = BootstrapVerificationConfig::default();
+
+        let result = verify_bootstrap_signature(&bootstrap, api_key, &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("future"));
+    }
+
+    #[test]
+    fn test_verify_bootstrap_legacy_format() {
+        // Legacy format: no signature, no timestamp
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap = BootstrapConfig::new(flags);
+        let config = BootstrapVerificationConfig::default();
+
+        // Should pass because there's no signature to verify
+        let result = verify_bootstrap_signature(&bootstrap, "sdk_test_key", &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_bootstrap_verification_disabled() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap = BootstrapConfig::with_signature(
+            flags,
+            "completely_invalid_signature".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let config = BootstrapVerificationConfig {
+            enabled: false,
+            max_age: 86400000,
+            on_failure: "error".to_string(),
+        };
+
+        // Should pass because verification is disabled
+        let result = verify_bootstrap_signature(&bootstrap, "sdk_test_key", &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_bootstrap_wrong_api_key() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let signature = sign_bootstrap(&flags, "sdk_correct_key", timestamp).unwrap();
+
+        let bootstrap = BootstrapConfig::with_signature(flags, signature, timestamp);
+        let config = BootstrapVerificationConfig::default();
+
+        // Verify with wrong key should fail
+        let result = verify_bootstrap_signature(&bootstrap, "sdk_wrong_key", &config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid bootstrap signature"));
+    }
+
+    #[test]
+    fn test_verify_bootstrap_with_policy_error() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap = BootstrapConfig::with_signature(
+            flags,
+            "invalid_signature".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let config = BootstrapVerificationConfig::custom(true, 86400000, "error");
+
+        let result = verify_bootstrap_with_policy(&bootstrap, "sdk_test_key", &config);
+        assert!(result.is_failed());
+        assert!(result.error_message().unwrap().contains("Invalid"));
+    }
+
+    #[test]
+    fn test_verify_bootstrap_with_policy_warn() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap = BootstrapConfig::with_signature(
+            flags,
+            "invalid_signature".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let config = BootstrapVerificationConfig::custom(true, 86400000, "warn");
+
+        let result = verify_bootstrap_with_policy(&bootstrap, "sdk_test_key", &config);
+        // With "warn" policy, failure is logged but returns Skipped
+        assert_eq!(result, BootstrapVerificationResult::Skipped);
+    }
+
+    #[test]
+    fn test_verify_bootstrap_with_policy_ignore() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap = BootstrapConfig::with_signature(
+            flags,
+            "invalid_signature".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+        let config = BootstrapVerificationConfig::custom(true, 86400000, "ignore");
+
+        let result = verify_bootstrap_with_policy(&bootstrap, "sdk_test_key", &config);
+        assert_eq!(result, BootstrapVerificationResult::Skipped);
+    }
+
+    #[test]
+    fn test_verify_bootstrap_with_policy_success() {
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let api_key = "sdk_test_key";
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
+
+        let bootstrap = BootstrapConfig::with_signature(flags, signature, timestamp);
+        let config = BootstrapVerificationConfig::default();
+
+        let result = verify_bootstrap_with_policy(&bootstrap, api_key, &config);
+        assert_eq!(result, BootstrapVerificationResult::Success);
+    }
+
+    #[test]
+    fn test_bootstrap_verification_result_methods() {
+        assert!(BootstrapVerificationResult::Success.is_ok());
+        assert!(BootstrapVerificationResult::Skipped.is_ok());
+        assert!(!BootstrapVerificationResult::Failed("error".to_string()).is_ok());
+
+        assert!(!BootstrapVerificationResult::Success.is_failed());
+        assert!(!BootstrapVerificationResult::Skipped.is_failed());
+        assert!(BootstrapVerificationResult::Failed("error".to_string()).is_failed());
+
+        assert!(BootstrapVerificationResult::Success.error_message().is_none());
+        assert!(BootstrapVerificationResult::Skipped.error_message().is_none());
+        assert_eq!(
+            BootstrapVerificationResult::Failed("test error".to_string()).error_message(),
+            Some("test error")
+        );
+    }
+
+    #[test]
+    fn test_constant_time_compare() {
+        assert!(constant_time_compare("hello", "hello"));
+        assert!(!constant_time_compare("hello", "world"));
+        assert!(!constant_time_compare("hello", "hell"));
+        assert!(!constant_time_compare("abc", "abcd"));
+    }
+
+    #[test]
+    fn test_bootstrap_verification_config_builders() {
+        let strict = BootstrapVerificationConfig::strict();
+        assert!(strict.enabled);
+        assert_eq!(strict.on_failure, "error");
+
+        let permissive = BootstrapVerificationConfig::permissive();
+        assert!(!permissive.enabled);
+        assert_eq!(permissive.on_failure, "ignore");
+
+        let custom = BootstrapVerificationConfig::custom(true, 3600000, "warn");
+        assert!(custom.enabled);
+        assert_eq!(custom.max_age, 3600000);
+        assert_eq!(custom.on_failure, "warn");
     }
 }

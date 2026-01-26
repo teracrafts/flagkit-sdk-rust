@@ -50,8 +50,9 @@ pub use error::{ErrorCode, FlagKitError, Result};
 
 // Re-exports from core module
 pub use core::{
-    ContextManager, EvaluationJitterConfig, Event, EventQueue, EventQueueConfig, FlagKitOptions,
-    FlagKitOptionsBuilder, PollCallback, PollingConfig, PollingManager,
+    BootstrapConfig, BootstrapVerificationConfig, ContextManager, EvaluationJitterConfig, Event,
+    EventQueue, EventQueueConfig, FlagKitOptions, FlagKitOptionsBuilder, PollCallback,
+    PollingConfig, PollingManager,
 };
 
 // Re-exports from http module

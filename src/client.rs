@@ -15,8 +15,9 @@ use crate::core::{
     ContextManager, EventQueue, EventQueueConfig, FlagCache, FlagKitOptions, PollCallback,
     PollingConfig, PollingManager,
 };
-use crate::error::Result;
+use crate::error::{ErrorCode, FlagKitError, Result};
 use crate::http::HttpClient;
+use crate::security::{verify_bootstrap_with_policy, BootstrapVerificationResult};
 use crate::types::{EvaluationContext, EvaluationReason, EvaluationResult, FlagState, FlagValue};
 
 /// Response from the SDK init endpoint.
@@ -191,13 +192,8 @@ impl FlagKitClient {
             session_id,
         };
 
-        // Load bootstrap data if provided
-        if let Some(ref bootstrap) = options.bootstrap {
-            for (key, value) in bootstrap {
-                let flag = FlagState::new(key.clone(), FlagValue::from(value.clone()));
-                client.cache.set(key.clone(), flag);
-            }
-        }
+        // Load bootstrap data with verification
+        client.load_bootstrap(&options)?;
 
         Ok(client)
     }
@@ -215,6 +211,58 @@ impl FlagKitClient {
     /// Check if the client has been closed.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    /// Load bootstrap data into the cache.
+    ///
+    /// Supports both legacy format (raw HashMap) and new format (BootstrapConfig with signature).
+    /// When a signature is provided, it is verified according to the bootstrap_verification config.
+    fn load_bootstrap(&self, options: &FlagKitOptions) -> Result<()> {
+        // Prefer BootstrapConfig if provided, otherwise use legacy bootstrap HashMap
+        if let Some(ref bootstrap_config) = options.bootstrap_config {
+            // Verify signature if present
+            let verification_result = verify_bootstrap_with_policy(
+                bootstrap_config,
+                &options.api_key,
+                &options.bootstrap_verification,
+            );
+
+            match verification_result {
+                BootstrapVerificationResult::Failed(msg) => {
+                    return Err(FlagKitError::new(
+                        ErrorCode::SecurityBootstrapVerificationFailed,
+                        format!("Bootstrap verification failed: {}", msg),
+                    ));
+                }
+                BootstrapVerificationResult::Success => {
+                    tracing::info!("Bootstrap signature verified successfully");
+                }
+                BootstrapVerificationResult::Skipped => {
+                    tracing::debug!("Bootstrap verification skipped");
+                }
+            }
+
+            // Load the flags into cache
+            for (key, value) in &bootstrap_config.flags {
+                let flag = FlagState::new(key.clone(), FlagValue::from(value.clone()));
+                self.cache.set(key.clone(), flag);
+            }
+
+            tracing::debug!(
+                "Loaded {} bootstrap flags from BootstrapConfig",
+                bootstrap_config.flags.len()
+            );
+        } else if let Some(ref bootstrap) = options.bootstrap {
+            // Legacy format: raw HashMap without signature
+            for (key, value) in bootstrap {
+                let flag = FlagState::new(key.clone(), FlagValue::from(value.clone()));
+                self.cache.set(key.clone(), flag);
+            }
+
+            tracing::debug!("Loaded {} bootstrap flags (legacy format)", bootstrap.len());
+        }
+
+        Ok(())
     }
 
     /// Initialize the client by fetching flag configurations from the server.
@@ -988,5 +1036,224 @@ mod tests {
         assert!(options.evaluation_jitter.enabled);
         assert_eq!(options.evaluation_jitter.min_ms, 5);
         assert_eq!(options.evaluation_jitter.max_ms, 15);
+    }
+
+    // === Bootstrap Verification Tests ===
+
+    #[test]
+    fn test_bootstrap_config_with_valid_signature() {
+        use crate::core::BootstrapConfig;
+        use crate::security::sign_bootstrap;
+
+        let mut flags = HashMap::new();
+        flags.insert("feature-a".to_string(), serde_json::json!(true));
+        flags.insert("feature-b".to_string(), serde_json::json!("enabled"));
+
+        let api_key = "sdk_test_key";
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
+
+        let bootstrap_config = BootstrapConfig::with_signature(flags, signature, timestamp);
+
+        let options = FlagKitOptions::builder(api_key)
+            .local_port(8200)
+            .bootstrap_config(bootstrap_config)
+            .build();
+
+        let client = FlagKitClient::new(options);
+        assert!(client.is_ok(), "Client creation should succeed with valid signature");
+
+        let client = client.unwrap();
+        assert!(client.has_flag("feature-a"));
+        assert!(client.has_flag("feature-b"));
+        assert!(client.get_boolean_value("feature-a", false, None));
+    }
+
+    #[test]
+    fn test_bootstrap_config_with_invalid_signature_error_mode() {
+        use crate::core::BootstrapConfig;
+        use crate::core::BootstrapVerificationConfig;
+
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap_config = BootstrapConfig::with_signature(
+            flags,
+            "invalid_signature".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+
+        let verification_config = BootstrapVerificationConfig::strict();
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap_config(bootstrap_config)
+            .bootstrap_verification(verification_config)
+            .build();
+
+        let client = FlagKitClient::new(options);
+        assert!(client.is_err(), "Client creation should fail with invalid signature in error mode");
+
+        match client {
+            Ok(_) => panic!("Expected error but got Ok"),
+            Err(err) => {
+                assert_eq!(err.code, crate::error::ErrorCode::SecurityBootstrapVerificationFailed);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_config_with_invalid_signature_warn_mode() {
+        use crate::core::BootstrapConfig;
+        use crate::core::BootstrapVerificationConfig;
+
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap_config = BootstrapConfig::with_signature(
+            flags,
+            "invalid_signature".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+
+        // Default mode is "warn" - should log warning but succeed
+        let verification_config = BootstrapVerificationConfig::default();
+        assert_eq!(verification_config.on_failure, "warn");
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap_config(bootstrap_config)
+            .bootstrap_verification(verification_config)
+            .build();
+
+        let client = FlagKitClient::new(options);
+        assert!(client.is_ok(), "Client creation should succeed with invalid signature in warn mode");
+
+        // Flags should still be loaded
+        let client = client.unwrap();
+        assert!(client.has_flag("feature"));
+    }
+
+    #[test]
+    fn test_bootstrap_config_with_expired_timestamp() {
+        use crate::core::{BootstrapConfig, BootstrapVerificationConfig};
+        use crate::security::sign_bootstrap;
+
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let api_key = "sdk_test_key";
+        // 2 days ago (exceeds default 24h max_age)
+        let timestamp = chrono::Utc::now().timestamp_millis() - (2 * 24 * 60 * 60 * 1000);
+        let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
+
+        let bootstrap_config = BootstrapConfig::with_signature(flags, signature, timestamp);
+
+        let verification_config = BootstrapVerificationConfig::strict();
+
+        let options = FlagKitOptions::builder(api_key)
+            .local_port(8200)
+            .bootstrap_config(bootstrap_config)
+            .bootstrap_verification(verification_config)
+            .build();
+
+        let client = FlagKitClient::new(options);
+        assert!(client.is_err(), "Client creation should fail with expired bootstrap");
+    }
+
+    #[test]
+    fn test_bootstrap_config_legacy_format_no_signature() {
+        use crate::core::BootstrapConfig;
+
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        // Legacy format: no signature
+        let bootstrap_config = BootstrapConfig::new(flags);
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap_config(bootstrap_config)
+            .build();
+
+        let client = FlagKitClient::new(options);
+        assert!(client.is_ok(), "Client creation should succeed with legacy format (no signature)");
+
+        let client = client.unwrap();
+        assert!(client.has_flag("feature"));
+    }
+
+    #[test]
+    fn test_bootstrap_config_verification_disabled() {
+        use crate::core::{BootstrapConfig, BootstrapVerificationConfig};
+
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(true));
+
+        let bootstrap_config = BootstrapConfig::with_signature(
+            flags,
+            "completely_invalid".to_string(),
+            chrono::Utc::now().timestamp_millis(),
+        );
+
+        let verification_config = BootstrapVerificationConfig::permissive();
+        assert!(!verification_config.enabled);
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap_config(bootstrap_config)
+            .bootstrap_verification(verification_config)
+            .build();
+
+        let client = FlagKitClient::new(options);
+        assert!(client.is_ok(), "Client creation should succeed when verification is disabled");
+
+        let client = client.unwrap();
+        assert!(client.has_flag("feature"));
+    }
+
+    #[test]
+    fn test_bootstrap_with_signature_builder() {
+        use crate::security::sign_bootstrap;
+
+        let mut flags = HashMap::new();
+        flags.insert("feature".to_string(), serde_json::json!(42));
+
+        let api_key = "sdk_test_key";
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
+
+        let options = FlagKitOptions::builder(api_key)
+            .local_port(8200)
+            .bootstrap_with_signature(flags, signature, timestamp)
+            .build();
+
+        let client = FlagKitClient::new(options).unwrap();
+        assert_eq!(client.get_number_value("feature", 0.0, None), 42.0);
+    }
+
+    #[test]
+    fn test_bootstrap_config_takes_precedence_over_legacy() {
+        use crate::core::BootstrapConfig;
+
+        let mut legacy_flags = HashMap::new();
+        legacy_flags.insert("legacy-feature".to_string(), serde_json::json!(true));
+
+        let mut config_flags = HashMap::new();
+        config_flags.insert("config-feature".to_string(), serde_json::json!(true));
+
+        let bootstrap_config = BootstrapConfig::new(config_flags);
+
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .local_port(8200)
+            .bootstrap(legacy_flags) // This should be ignored
+            .bootstrap_config(bootstrap_config) // This should take precedence
+            .build();
+
+        let client = FlagKitClient::new(options).unwrap();
+
+        // Should have config-feature, not legacy-feature
+        assert!(client.has_flag("config-feature"));
+        assert!(!client.has_flag("legacy-feature"));
     }
 }
