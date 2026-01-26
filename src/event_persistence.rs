@@ -552,7 +552,7 @@ impl EventPersistence {
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "jsonl") {
+            if path.extension().is_some_and(|ext| ext == "jsonl") {
                 self.read_log_file(&path, &mut events)?;
             }
         }
@@ -598,7 +598,7 @@ impl EventPersistence {
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "jsonl") {
+            if path.extension().is_some_and(|ext| ext == "jsonl") {
                 log_files.push(path.clone());
                 self.read_log_file(&path, &mut events)?;
             }
