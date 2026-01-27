@@ -17,6 +17,42 @@ flagkit = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
 ```
 
+## Features
+
+- **Type-safe evaluation** - Boolean, string, number, and JSON flag types
+- **Local caching** - Fast evaluations with configurable TTL and optional encryption
+- **Background polling** - Automatic flag updates with async runtime
+- **Event tracking** - Analytics with batching and crash-resilient persistence
+- **Resilient** - Circuit breaker, retry with exponential backoff, offline support
+- **Thread-safe** - Safe for concurrent use across threads
+- **Security** - PII detection, request signing, bootstrap verification, cache encryption
+
+## Architecture
+
+The SDK is organized into clean, modular components:
+
+```
+flagkit/
+├── lib.rs               # Public exports and FlagKit factory
+├── client.rs            # FlagKitClient implementation
+├── core/                # Core components
+│   ├── config.rs        # FlagKitOptions configuration
+│   ├── cache.rs         # In-memory cache with TTL
+│   ├── context_manager.rs
+│   ├── polling_manager.rs
+│   └── event_queue.rs   # Event batching
+├── http/                # HTTP client, circuit breaker, retry
+│   ├── client.rs
+│   └── circuit_breaker.rs
+├── error/               # Error types and codes
+│   ├── mod.rs
+│   └── sanitizer.rs     # Error message sanitization
+├── types/               # Type definitions
+│   └── mod.rs           # EvaluationContext, EvaluationResult, FlagState
+├── security.rs          # PII detection, HMAC signing, encryption
+└── event_persistence.rs # Crash-resilient persistence
+```
+
 ## Quick Start
 
 ```rust
@@ -270,6 +306,220 @@ let options = FlagKitOptions::builder("sdk_your_api_key")
 
 FlagKit::initialize(options)?;
 ```
+
+## Security Features
+
+### PII Detection
+
+The SDK can detect and warn about potential PII (Personally Identifiable Information) in contexts and events:
+
+```rust
+use flagkit::security::{SecurityConfig, check_pii_strict, DataType};
+
+// Enable strict PII mode - returns errors instead of warnings
+let config = SecurityConfig::builder()
+    .strict_pii_mode(true)
+    .build();
+
+// Attributes containing PII will return FlagKitError
+let data = serde_json::json!({
+    "email": "user@example.com"  // PII detected!
+});
+
+if let Err(e) = check_pii_strict(Some(&data), DataType::Context, &config) {
+    println!("PII error: {}", e);
+}
+
+// Use private_attributes to mark fields as intentionally containing PII
+let config = SecurityConfig::builder()
+    .add_private_attribute("email")
+    .add_private_attribute("phone")
+    .build();
+```
+
+### Request Signing
+
+POST requests to the FlagKit API can be signed with HMAC-SHA256 for integrity:
+
+```rust
+use flagkit::security::{sign_request, SecurityConfig};
+
+let body = r#"{"flag_key": "my-flag"}"#;
+let signature = sign_request(body, "sdk_your_api_key")?;
+
+// Use signature headers in HTTP request:
+// X-Signature: signature.signature
+// X-Timestamp: signature.timestamp
+// X-Key-Id: signature.key_id
+
+// Enable request signing in config
+let config = SecurityConfig::builder()
+    .enable_request_signing(true)
+    .build();
+```
+
+### Bootstrap Signature Verification
+
+Verify bootstrap data integrity using HMAC signatures:
+
+```rust
+use flagkit::{FlagKitOptions, BootstrapConfig, BootstrapVerificationConfig};
+use flagkit::security::sign_bootstrap;
+use std::collections::HashMap;
+
+// Create signed bootstrap data
+let mut flags = HashMap::new();
+flags.insert("feature-a".to_string(), serde_json::json!(true));
+flags.insert("feature-b".to_string(), serde_json::json!("value"));
+
+let timestamp = chrono::Utc::now().timestamp_millis();
+let signature = sign_bootstrap(&flags, "sdk_your_api_key", timestamp)?;
+
+// Use signed bootstrap with verification
+let options = FlagKitOptions::builder("sdk_your_api_key")
+    .bootstrap_with_signature(flags, signature, timestamp)
+    .bootstrap_verification(BootstrapVerificationConfig::custom(
+        true,           // enabled
+        86400000,       // max_age: 24 hours in milliseconds
+        "error"         // on_failure: "warn" (default), "error", or "ignore"
+    ))
+    .build();
+```
+
+### Cache Encryption
+
+Enable AES-256-GCM encryption with PBKDF2 key derivation for cached flag data:
+
+```rust
+use flagkit::security::{EncryptedCache, SecurityConfig};
+
+// Create encrypted cache
+let cache = EncryptedCache::new("sdk_your_api_key")?;
+
+// Encrypt/decrypt data
+let encrypted = cache.encrypt(b"sensitive data")?;
+let decrypted = cache.decrypt(&encrypted)?;
+
+// Encrypt/decrypt JSON values
+let value = serde_json::json!({"flags": {"feature": true}});
+let encrypted_json = cache.encrypt_json(&value)?;
+let decrypted_json = cache.decrypt_json(&encrypted_json)?;
+
+// Enable in config
+let config = SecurityConfig::builder()
+    .enable_cache_encryption(true)
+    .build();
+```
+
+### Evaluation Jitter (Timing Attack Protection)
+
+Add random delays to flag evaluations to prevent cache timing attacks:
+
+```rust
+use flagkit::{FlagKitOptions, EvaluationJitterConfig};
+
+let options = FlagKitOptions::builder("sdk_your_api_key")
+    .evaluation_jitter(EvaluationJitterConfig::new(
+        true,   // enabled
+        5,      // min_ms
+        15      // max_ms
+    ))
+    .build();
+
+// Or use the convenience method
+let options = FlagKitOptions::builder("sdk_your_api_key")
+    .enable_evaluation_jitter()
+    .build();
+```
+
+### Error Sanitization
+
+Automatically redact sensitive information from error messages:
+
+```rust
+use flagkit::FlagKitOptions;
+use flagkit::error::ErrorSanitizationConfig;
+
+let options = FlagKitOptions::builder("sdk_your_api_key")
+    .error_sanitization(ErrorSanitizationConfig {
+        enabled: true,
+        preserve_original: false,  // Set true for debugging
+    })
+    .build();
+
+// Or use convenience methods
+let options = FlagKitOptions::builder("sdk_your_api_key")
+    .error_sanitization_with_preservation()  // Enable with preservation
+    // .disable_error_sanitization()         // Disable entirely
+    .build();
+```
+
+## Event Persistence
+
+Enable crash-resilient event persistence to prevent data loss:
+
+```rust
+use flagkit::FlagKitOptions;
+use std::time::Duration;
+
+let options = FlagKitOptions::builder("sdk_your_api_key")
+    .persist_events(true)
+    .event_storage_path("/path/to/storage")  // Optional, defaults to temp dir
+    .max_persisted_events(10000)             // Optional, default 10000
+    .persistence_flush_interval(Duration::from_secs(1))  // Optional
+    .build();
+```
+
+Events are written to disk before being queued for sending, and automatically recovered on restart.
+
+## Key Rotation
+
+Support seamless API key rotation:
+
+```rust
+use flagkit::security::ApiKeyManager;
+
+// Using ApiKeyManager directly
+let manager = ApiKeyManager::new(
+    "sdk_primary_key",
+    Some("sdk_secondary_key".to_string())
+);
+
+// SDK will automatically failover on 401 errors
+if manager.handle_401_error()? {
+    println!("Switched to secondary key");
+}
+
+// Reset to primary key
+manager.reset_to_primary();
+```
+
+## All Configuration Options
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `api_key` | String | Required | API key for authentication |
+| `polling_interval` | Duration | 30s | Polling interval |
+| `cache_ttl` | Duration | 300s | Cache TTL |
+| `max_cache_size` | usize | 1000 | Maximum cache entries |
+| `cache_enabled` | bool | true | Enable local caching |
+| `events_enabled` | bool | true | Enable event tracking |
+| `event_batch_size` | usize | 10 | Events per batch |
+| `event_flush_interval` | Duration | 30s | Interval between flushes |
+| `timeout` | Duration | 10s | Request timeout |
+| `retry_attempts` | u32 | 3 | Number of retry attempts |
+| `circuit_breaker_threshold` | u32 | 5 | Failures before circuit opens |
+| `circuit_breaker_reset_timeout` | Duration | 30s | Time before half-open |
+| `bootstrap` | HashMap? | None | Initial flag values |
+| `bootstrap_config` | BootstrapConfig? | None | Signed bootstrap data |
+| `bootstrap_verification` | Config | enabled | Bootstrap verification settings |
+| `local_port` | u16? | None | Local development port |
+| `persist_events` | bool | false | Enable event persistence |
+| `event_storage_path` | PathBuf? | temp dir | Event storage directory |
+| `max_persisted_events` | usize | 10000 | Max persisted events |
+| `persistence_flush_interval` | Duration | 1s | Persistence flush interval |
+| `evaluation_jitter` | Config | disabled | Timing attack protection |
+| `error_sanitization` | Config | enabled | Sanitize error messages |
 
 ## Development
 
