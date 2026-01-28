@@ -40,5 +40,9 @@ tokio-test = "0.4"
 wiremock = "0.5"
 tempfile = "3.10"
 
+[[example]]
+name = "sdk-lab"
+path = "sdk-lab/main.rs"
+
 [features]
 default = []
