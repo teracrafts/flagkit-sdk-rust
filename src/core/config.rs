@@ -193,6 +193,8 @@ pub struct FlagKitOptions {
     pub bootstrap_verification: BootstrapVerificationConfig,
     /// Configuration for error message sanitization.
     pub error_sanitization: ErrorSanitizationConfig,
+    /// Enable HMAC-SHA256 request signing for POST requests.
+    pub enable_request_signing: bool,
 }
 
 impl FlagKitOptions {
@@ -220,6 +222,7 @@ impl FlagKitOptions {
             evaluation_jitter: EvaluationJitterConfig::default(),
             bootstrap_verification: BootstrapVerificationConfig::default(),
             error_sanitization: ErrorSanitizationConfig::default(),
+            enable_request_signing: false,
         }
     }
 
@@ -284,6 +287,7 @@ pub struct FlagKitOptionsBuilder {
     evaluation_jitter: EvaluationJitterConfig,
     bootstrap_verification: BootstrapVerificationConfig,
     error_sanitization: ErrorSanitizationConfig,
+    enable_request_signing: bool,
 }
 
 impl FlagKitOptionsBuilder {
@@ -311,6 +315,7 @@ impl FlagKitOptionsBuilder {
             evaluation_jitter: EvaluationJitterConfig::default(),
             bootstrap_verification: BootstrapVerificationConfig::default(),
             error_sanitization: ErrorSanitizationConfig::default(),
+            enable_request_signing: false,
         }
     }
 
@@ -456,6 +461,12 @@ impl FlagKitOptionsBuilder {
         self
     }
 
+    /// Enable HMAC-SHA256 request signing for POST requests.
+    pub fn enable_request_signing(mut self, enabled: bool) -> Self {
+        self.enable_request_signing = enabled;
+        self
+    }
+
     pub fn build(self) -> FlagKitOptions {
         FlagKitOptions {
             api_key: self.api_key,
@@ -480,6 +491,7 @@ impl FlagKitOptionsBuilder {
             evaluation_jitter: self.evaluation_jitter,
             bootstrap_verification: self.bootstrap_verification,
             error_sanitization: self.error_sanitization,
+            enable_request_signing: self.enable_request_signing,
         }
     }
 }
