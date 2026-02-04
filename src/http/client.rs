@@ -6,6 +6,7 @@ use std::time::Duration;
 use super::circuit_breaker::CircuitBreaker;
 use crate::core::FlagKitOptions;
 use crate::error::{ErrorCode, FlagKitError, Result};
+use crate::security::sign_request;
 
 const DEFAULT_BASE_URL: &str = "https://api.flagkit.dev/api/v1";
 
@@ -183,6 +184,8 @@ impl HttpClient {
             .get(&url)
             .header("X-API-Key", &self.options.api_key)
             .header("User-Agent", "FlagKit-Rust/1.0.0")
+            .header("X-FlagKit-SDK-Version", "1.0.0")
+            .header("X-FlagKit-SDK-Language", "rust")
             .send()
             .await
             .map_err(|e| self.convert_error(e))?;
@@ -193,13 +196,35 @@ impl HttpClient {
     async fn do_post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let url = format!("{}{}", self.base_url(), path);
 
-        let response = self
+        // Serialize body to JSON for signing
+        let body_json = serde_json::to_string(body).map_err(|e| {
+            FlagKitError::with_source(
+                ErrorCode::HttpInvalidResponse,
+                "Failed to serialize request body",
+                e,
+            )
+        })?;
+
+        let mut request_builder = self
             .client
             .post(&url)
             .header("X-API-Key", &self.options.api_key)
             .header("User-Agent", "FlagKit-Rust/1.0.0")
-            .header("Content-Type", "application/json")
-            .json(body)
+            .header("X-FlagKit-SDK-Version", "1.0.0")
+            .header("X-FlagKit-SDK-Language", "rust")
+            .header("Content-Type", "application/json");
+
+        // Add request signing headers if enabled
+        if self.options.enable_request_signing {
+            let signature = sign_request(&body_json, &self.options.api_key)?;
+            request_builder = request_builder
+                .header("X-Signature", signature.x_signature())
+                .header("X-Timestamp", signature.x_timestamp())
+                .header("X-Key-Id", signature.x_key_id());
+        }
+
+        let response = request_builder
+            .body(body_json)
             .send()
             .await
             .map_err(|e| self.convert_error(e))?;
@@ -415,5 +440,22 @@ mod tests {
         let client = HttpClient::with_usage_callback(options, Some(callback)).unwrap();
 
         assert!(client.on_usage_update.is_some());
+    }
+
+    #[test]
+    fn test_request_signing_default_disabled() {
+        let options = FlagKitOptions::builder("sdk_test_key").build();
+        assert!(!options.enable_request_signing);
+    }
+
+    #[test]
+    fn test_request_signing_can_be_enabled() {
+        let options = FlagKitOptions::builder("sdk_test_key")
+            .enable_request_signing(true)
+            .build();
+        assert!(options.enable_request_signing);
+
+        let client = HttpClient::new(options).unwrap();
+        assert!(client.options.enable_request_signing);
     }
 }
