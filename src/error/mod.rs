@@ -18,11 +18,15 @@ pub enum ErrorCode {
     AuthMissingKey,
     AuthUnauthorized,
     AuthPermissionDenied,
+    AuthIpRestricted,
+    AuthOrganizationRequired,
+    AuthSubscriptionSuspended,
 
     // Network errors
     NetworkError,
     NetworkTimeout,
     NetworkRetryLimit,
+    NetworkServiceUnavailable,
 
     // HTTP errors
     HttpBadRequest,
@@ -84,6 +88,13 @@ pub enum ErrorCode {
     ConfigInvalidPollingInterval,
     ConfigInvalidCacheTtl,
 
+    // Streaming errors
+    StreamingTokenInvalid,
+    StreamingTokenExpired,
+    StreamingSubscriptionSuspended,
+    StreamingConnectionLimit,
+    StreamingUnavailable,
+
     // Security errors
     SecurityLocalPortInProduction,
     SecurityPiiDetected,
@@ -105,9 +116,13 @@ impl ErrorCode {
             ErrorCode::AuthMissingKey => "AUTH_MISSING_KEY",
             ErrorCode::AuthUnauthorized => "AUTH_UNAUTHORIZED",
             ErrorCode::AuthPermissionDenied => "AUTH_PERMISSION_DENIED",
+            ErrorCode::AuthIpRestricted => "AUTH_IP_RESTRICTED",
+            ErrorCode::AuthOrganizationRequired => "AUTH_ORGANIZATION_REQUIRED",
+            ErrorCode::AuthSubscriptionSuspended => "AUTH_SUBSCRIPTION_SUSPENDED",
             ErrorCode::NetworkError => "NETWORK_ERROR",
             ErrorCode::NetworkTimeout => "NETWORK_TIMEOUT",
             ErrorCode::NetworkRetryLimit => "NETWORK_RETRY_LIMIT",
+            ErrorCode::NetworkServiceUnavailable => "NETWORK_SERVICE_UNAVAILABLE",
             ErrorCode::HttpBadRequest => "HTTP_BAD_REQUEST",
             ErrorCode::HttpUnauthorized => "HTTP_UNAUTHORIZED",
             ErrorCode::HttpForbidden => "HTTP_FORBIDDEN",
@@ -154,6 +169,11 @@ impl ErrorCode {
             ErrorCode::ConfigInvalidCacheTtl => "CONFIG_INVALID_CACHE_TTL",
             ErrorCode::CacheEncryptionError => "CACHE_ENCRYPTION_ERROR",
             ErrorCode::CacheDecryptionError => "CACHE_DECRYPTION_ERROR",
+            ErrorCode::StreamingTokenInvalid => "STREAMING_TOKEN_INVALID",
+            ErrorCode::StreamingTokenExpired => "STREAMING_TOKEN_EXPIRED",
+            ErrorCode::StreamingSubscriptionSuspended => "STREAMING_SUBSCRIPTION_SUSPENDED",
+            ErrorCode::StreamingConnectionLimit => "STREAMING_CONNECTION_LIMIT",
+            ErrorCode::StreamingUnavailable => "STREAMING_UNAVAILABLE",
             ErrorCode::SecurityLocalPortInProduction => "SECURITY_LOCAL_PORT_IN_PRODUCTION",
             ErrorCode::SecurityPiiDetected => "SECURITY_PII_DETECTED",
             ErrorCode::SecuritySignatureError => "SECURITY_SIGNATURE_ERROR",
@@ -169,6 +189,7 @@ impl ErrorCode {
             ErrorCode::NetworkError
                 | ErrorCode::NetworkTimeout
                 | ErrorCode::NetworkRetryLimit
+                | ErrorCode::NetworkServiceUnavailable
                 | ErrorCode::CircuitOpen
                 | ErrorCode::HttpCircuitOpen
                 | ErrorCode::HttpTimeout
@@ -180,6 +201,10 @@ impl ErrorCode {
                 | ErrorCode::EvalCacheMiss
                 | ErrorCode::EvalNetworkError
                 | ErrorCode::EventSendFailed
+                | ErrorCode::StreamingTokenInvalid
+                | ErrorCode::StreamingTokenExpired
+                | ErrorCode::StreamingConnectionLimit
+                | ErrorCode::StreamingUnavailable
         )
     }
 }
