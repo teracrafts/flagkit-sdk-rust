@@ -3,6 +3,7 @@ mod config;
 mod context_manager;
 mod event_queue;
 mod polling_manager;
+pub mod streaming_manager;
 
 pub use cache::{Cache, FlagCache};
 pub use config::{
@@ -21,4 +22,9 @@ pub use polling_manager::{
     PollCallback, PollingConfig, PollingConfigBuilder, PollingManager,
     DEFAULT_BACKOFF_MULTIPLIER, DEFAULT_JITTER_MS, DEFAULT_MAX_INTERVAL_SECS,
     DEFAULT_POLLING_INTERVAL_SECS,
+};
+pub use streaming_manager::{
+    ConnectionLimitErrorCallback, FallbackCallback, FlagDeleteCallback, FlagUpdateCallback,
+    FlagsResetCallback, StreamErrorCode, StreamErrorData, StreamingConfig, StreamingManager,
+    StreamingState, SubscriptionErrorCallback,
 };
