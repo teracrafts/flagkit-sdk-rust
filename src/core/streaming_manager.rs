@@ -226,10 +226,7 @@ impl StreamingManager {
             *state = StreamingState::Connecting;
         }
 
-        let manager = Arc::clone(&self);
-        tokio::spawn(async move {
-            manager.initiate_connection().await;
-        });
+        self.initiate_connection().await;
     }
 
     /// Stops the streaming connection.
@@ -264,13 +261,43 @@ impl StreamingManager {
 
         // Step 2: Schedule token refresh at 80% of TTL
         let refresh_delay = Duration::from_secs_f64(token_response.expires_in as f64 * 0.8);
-        let manager_clone = Arc::clone(&self);
-        tokio::spawn(async move {
-            manager_clone.schedule_token_refresh(refresh_delay).await;
-        });
+        self.spawn_token_refresh(refresh_delay);
 
         // Step 3: Create SSE connection with token
         self.create_connection(&token_response.token).await;
+    }
+
+    /// Spawns a token refresh task that runs in a loop.
+    fn spawn_token_refresh(self: &Arc<Self>, initial_delay: Duration) {
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            manager.token_refresh_loop(initial_delay).await;
+        });
+    }
+
+    /// Token refresh loop - runs until disconnected.
+    async fn token_refresh_loop(self: Arc<Self>, initial_delay: Duration) {
+        let mut delay = initial_delay;
+
+        loop {
+            sleep(delay).await;
+
+            // Check if still connected
+            if *self.state.read().await != StreamingState::Connected {
+                break;
+            }
+
+            match self.fetch_stream_token().await {
+                Ok(token_response) => {
+                    delay = Duration::from_secs_f64(token_response.expires_in as f64 * 0.8);
+                }
+                Err(_) => {
+                    // Token refresh failed - disconnect will trigger reconnection
+                    self.disconnect().await;
+                    break;
+                }
+            }
+        }
     }
 
     async fn fetch_stream_token(&self) -> Result<StreamTokenResponse, reqwest::Error> {
@@ -286,24 +313,6 @@ impl StreamingManager {
             .await?;
 
         response.json::<StreamTokenResponse>().await
-    }
-
-    async fn schedule_token_refresh(self: Arc<Self>, delay: Duration) {
-        sleep(delay).await;
-
-        match self.fetch_stream_token().await {
-            Ok(token_response) => {
-                let next_delay = Duration::from_secs_f64(token_response.expires_in as f64 * 0.8);
-                let manager = Arc::clone(&self);
-                tokio::spawn(async move {
-                    manager.schedule_token_refresh(next_delay).await;
-                });
-            }
-            Err(_) => {
-                self.disconnect().await;
-                self.connect().await;
-            }
-        }
     }
 
     async fn create_connection(self: Arc<Self>, token: &str) {
@@ -498,20 +507,20 @@ impl StreamingManager {
         if failures >= self.config.max_reconnect_attempts {
             *self.state.write().await = StreamingState::Failed;
             (self.on_fallback_to_polling)();
-            self.schedule_streaming_retry().await;
+            self.schedule_streaming_retry();
         } else {
             *self.state.write().await = StreamingState::Reconnecting;
-            self.schedule_reconnect().await;
+            self.schedule_reconnect();
         }
     }
 
-    async fn schedule_reconnect(self: &Arc<Self>) {
+    fn schedule_reconnect(self: &Arc<Self>) {
         let delay = self.get_reconnect_delay();
         let manager = Arc::clone(self);
 
         tokio::spawn(async move {
             sleep(delay).await;
-            manager.connect().await;
+            manager.initiate_connection().await;
         });
     }
 
@@ -524,12 +533,13 @@ impl StreamingManager {
         Duration::from_millis(delay.min(30000.0) as u64)
     }
 
-    async fn schedule_streaming_retry(self: &Arc<Self>) {
+    fn schedule_streaming_retry(self: &Arc<Self>) {
         let manager = Arc::clone(self);
 
         tokio::spawn(async move {
             sleep(Duration::from_secs(300)).await; // 5 minutes
-            manager.retry_connection().await;
+            manager.consecutive_failures.store(0, Ordering::SeqCst);
+            manager.initiate_connection().await;
         });
     }
 
