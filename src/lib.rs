@@ -50,13 +50,19 @@ pub use error::{ErrorCode, FlagKitError, Result};
 
 // Re-exports from core module
 pub use core::{
-    BootstrapConfig, BootstrapVerificationConfig, ContextManager, EvaluationJitterConfig, Event,
-    EventQueue, EventQueueConfig, FlagKitOptions, FlagKitOptionsBuilder, PollCallback,
-    PollingConfig, PollingManager,
+    BootstrapConfig, BootstrapVerificationConfig, ConnectionLimitErrorCallback, ContextManager,
+    EvaluationJitterConfig, Event, EventQueue, EventQueueConfig, FallbackCallback,
+    FlagDeleteCallback, FlagKitOptions, FlagKitOptionsBuilder, FlagUpdateCallback,
+    FlagsResetCallback, PollCallback, PollingConfig, PollingManager, StreamErrorCode,
+    StreamErrorData, StreamingConfig, StreamingManager, StreamingState,
+    SubscriptionErrorCallback,
 };
 
 // Re-exports from http module
-pub use http::{CircuitBreaker, CircuitState, HttpClient, RetryConfig};
+pub use http::{
+    CircuitBreaker, CircuitState, HttpClient, RetryConfig, SubscriptionStatus, UsageMetrics,
+    UsageUpdateCallback,
+};
 
 // Re-exports from client module
 pub use client::{FlagKitClient, SharedClient};
