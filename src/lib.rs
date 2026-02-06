@@ -37,6 +37,7 @@ pub mod http;
 pub mod core;
 pub mod security;
 pub mod event_persistence;
+pub mod utils;
 mod client;
 
 // Re-exports from types module
@@ -65,7 +66,12 @@ pub use http::{
 };
 
 // Re-exports from client module
-pub use client::{FlagKitClient, SharedClient};
+pub use client::{FlagKitClient, InitMetadata, InitMetadataFeatures, SharedClient, SDK_VERSION};
+
+// Re-exports from utils module
+pub use utils::{
+    compare_versions, is_version_at_least, is_version_less_than, parse_version, ParsedVersion,
+};
 
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
