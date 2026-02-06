@@ -19,6 +19,47 @@ use crate::error::{ErrorCode, FlagKitError, Result};
 use crate::http::HttpClient;
 use crate::security::{verify_bootstrap_with_policy, BootstrapVerificationResult};
 use crate::types::{EvaluationContext, EvaluationReason, EvaluationResult, FlagState, FlagValue};
+use crate::utils::is_version_less_than;
+
+/// The current SDK version, matching Cargo.toml
+pub const SDK_VERSION: &str = "1.0.0";
+
+/// SDK feature flags metadata from the server.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitMetadataFeatures {
+    /// Whether streaming is enabled.
+    #[serde(default)]
+    pub streaming: bool,
+    /// Whether local evaluation is enabled.
+    #[serde(default)]
+    pub local_eval: bool,
+    /// Whether experiments are enabled.
+    #[serde(default)]
+    pub experiments: bool,
+    /// Whether segments are enabled.
+    #[serde(default)]
+    pub segments: bool,
+}
+
+/// SDK version and feature metadata from the init response.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitMetadata {
+    /// Minimum SDK version required (older versions may not work).
+    pub sdk_version_min: Option<String>,
+    /// Recommended SDK version for optimal experience.
+    pub sdk_version_recommended: Option<String>,
+    /// Latest available SDK version.
+    pub sdk_version_latest: Option<String>,
+    /// Deprecation warning message from server.
+    pub deprecation_warning: Option<String>,
+    /// Feature flags.
+    #[serde(default)]
+    pub features: InitMetadataFeatures,
+}
 
 /// Response from the SDK init endpoint.
 #[allow(dead_code)]
@@ -35,6 +76,9 @@ pub struct InitResponse {
     pub environment_id: Option<String>,
     /// Recommended polling interval in seconds.
     pub polling_interval_seconds: Option<u64>,
+    /// SDK metadata including version requirements.
+    #[serde(default)]
+    pub metadata: Option<InitMetadata>,
 }
 
 /// Response from the SDK updates endpoint.
@@ -278,6 +322,9 @@ impl FlagKitClient {
         }
 
         let response: InitResponse = self.http_client.get("/sdk/init").await?;
+
+        // Check SDK version metadata and emit warnings
+        self.check_version_metadata(&response);
 
         // Update cache with flags
         for flag in response.flags {
@@ -751,6 +798,78 @@ impl FlagKitClient {
         tracing::info!("FlagKit client closed");
     }
 
+    // === Version Metadata ===
+
+    /// Check SDK version metadata from init response and emit appropriate warnings.
+    ///
+    /// Per spec, the SDK should parse and surface:
+    /// - sdkVersionMin: Minimum required version (older may not work)
+    /// - sdkVersionRecommended: Recommended version for optimal experience
+    /// - sdkVersionLatest: Latest available version
+    /// - deprecationWarning: Server-provided deprecation message
+    fn check_version_metadata(&self, response: &InitResponse) {
+        let metadata = match &response.metadata {
+            Some(m) => m,
+            None => return,
+        };
+
+        // Check for server-provided deprecation warning first
+        if let Some(ref warning) = metadata.deprecation_warning {
+            eprintln!("[FlagKit] Deprecation Warning: {}", warning);
+            tracing::warn!("[FlagKit] Deprecation Warning: {}", warning);
+        }
+
+        // Check minimum version requirement
+        if let Some(ref min_version) = metadata.sdk_version_min {
+            if is_version_less_than(SDK_VERSION, min_version) {
+                eprintln!(
+                    "[FlagKit] SDK version {} is below minimum required version {}. \
+                    Some features may not work correctly. Please upgrade the SDK.",
+                    SDK_VERSION, min_version
+                );
+                tracing::error!(
+                    "[FlagKit] SDK version {} is below minimum required version {}. \
+                    Some features may not work correctly. Please upgrade the SDK.",
+                    SDK_VERSION, min_version
+                );
+            }
+        }
+
+        // Track if we warned about recommended version
+        let mut warned_about_recommended = false;
+
+        // Check recommended version
+        if let Some(ref recommended_version) = metadata.sdk_version_recommended {
+            if is_version_less_than(SDK_VERSION, recommended_version) {
+                eprintln!(
+                    "[FlagKit] SDK version {} is below recommended version {}. \
+                    Consider upgrading for the best experience.",
+                    SDK_VERSION, recommended_version
+                );
+                tracing::warn!(
+                    "[FlagKit] SDK version {} is below recommended version {}. \
+                    Consider upgrading for the best experience.",
+                    SDK_VERSION, recommended_version
+                );
+                warned_about_recommended = true;
+            }
+        }
+
+        // Log if a newer version is available (info level, not a warning)
+        // Only log if we haven't already warned about recommended
+        if let Some(ref latest_version) = metadata.sdk_version_latest {
+            if is_version_less_than(SDK_VERSION, latest_version) && !warned_about_recommended {
+                eprintln!(
+                    "[FlagKit] SDK version {} - a newer version {} is available.",
+                    SDK_VERSION, latest_version
+                );
+                tracing::info!(
+                    "[FlagKit] SDK version {} - a newer version {} is available.",
+                    SDK_VERSION, latest_version
+                );
+            }
+        }
+    }
 }
 
 impl Clone for FlagKitClient {
@@ -1255,5 +1374,157 @@ mod tests {
         // Should have config-feature, not legacy-feature
         assert!(client.has_flag("config-feature"));
         assert!(!client.has_flag("legacy-feature"));
+    }
+
+    // === SDK Version Metadata Tests ===
+
+    #[test]
+    fn test_sdk_version_constant() {
+        // Verify SDK_VERSION matches expected format
+        assert!(!SDK_VERSION.is_empty());
+        let parts: Vec<&str> = SDK_VERSION.split('.').collect();
+        assert_eq!(parts.len(), 3, "SDK_VERSION should be semver format");
+    }
+
+    #[test]
+    fn test_init_metadata_deserialize() {
+        let json = r#"{
+            "sdkVersionMin": "0.9.0",
+            "sdkVersionRecommended": "1.0.0",
+            "sdkVersionLatest": "1.1.0",
+            "deprecationWarning": "Please upgrade soon",
+            "features": {
+                "streaming": true,
+                "localEval": false,
+                "experiments": true,
+                "segments": false
+            }
+        }"#;
+
+        let metadata: InitMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(metadata.sdk_version_min, Some("0.9.0".to_string()));
+        assert_eq!(metadata.sdk_version_recommended, Some("1.0.0".to_string()));
+        assert_eq!(metadata.sdk_version_latest, Some("1.1.0".to_string()));
+        assert_eq!(metadata.deprecation_warning, Some("Please upgrade soon".to_string()));
+        assert!(metadata.features.streaming);
+        assert!(!metadata.features.local_eval);
+        assert!(metadata.features.experiments);
+        assert!(!metadata.features.segments);
+    }
+
+    #[test]
+    fn test_init_metadata_deserialize_partial() {
+        // Test that partial metadata (common case) deserializes correctly
+        let json = r#"{
+            "sdkVersionLatest": "1.2.0"
+        }"#;
+
+        let metadata: InitMetadata = serde_json::from_str(json).unwrap();
+        assert_eq!(metadata.sdk_version_min, None);
+        assert_eq!(metadata.sdk_version_recommended, None);
+        assert_eq!(metadata.sdk_version_latest, Some("1.2.0".to_string()));
+        assert_eq!(metadata.deprecation_warning, None);
+    }
+
+    #[test]
+    fn test_init_response_with_metadata() {
+        let json = r#"{
+            "flags": [],
+            "serverTime": "2024-01-01T00:00:00Z",
+            "environment": "production",
+            "environmentId": "env-123",
+            "pollingIntervalSeconds": 30,
+            "metadata": {
+                "sdkVersionMin": "0.9.0",
+                "sdkVersionRecommended": "1.0.0",
+                "sdkVersionLatest": "1.1.0",
+                "features": {}
+            }
+        }"#;
+
+        let response: InitResponse = serde_json::from_str(json).unwrap();
+        assert!(response.metadata.is_some());
+        let metadata = response.metadata.unwrap();
+        assert_eq!(metadata.sdk_version_min, Some("0.9.0".to_string()));
+    }
+
+    #[test]
+    fn test_init_response_without_metadata() {
+        // Ensure backwards compatibility when metadata is not present
+        let json = r#"{
+            "flags": [],
+            "serverTime": "2024-01-01T00:00:00Z",
+            "environmentId": "env-123"
+        }"#;
+
+        let response: InitResponse = serde_json::from_str(json).unwrap();
+        assert!(response.metadata.is_none());
+    }
+
+    #[test]
+    fn test_check_version_metadata_no_metadata() {
+        // When there's no metadata, nothing should happen (no panic)
+        let options = create_test_options();
+        let client = FlagKitClient::new(options).unwrap();
+
+        let response = InitResponse {
+            flags: vec![],
+            server_time: None,
+            environment: None,
+            environment_id: None,
+            polling_interval_seconds: None,
+            metadata: None,
+        };
+
+        // This should not panic
+        client.check_version_metadata(&response);
+    }
+
+    #[test]
+    fn test_check_version_metadata_with_deprecation_warning() {
+        let options = create_test_options();
+        let client = FlagKitClient::new(options).unwrap();
+
+        let response = InitResponse {
+            flags: vec![],
+            server_time: None,
+            environment: None,
+            environment_id: None,
+            polling_interval_seconds: None,
+            metadata: Some(InitMetadata {
+                sdk_version_min: None,
+                sdk_version_recommended: None,
+                sdk_version_latest: None,
+                deprecation_warning: Some("This SDK version is deprecated".to_string()),
+                features: InitMetadataFeatures::default(),
+            }),
+        };
+
+        // This should log a warning but not panic
+        client.check_version_metadata(&response);
+    }
+
+    #[test]
+    fn test_check_version_metadata_with_all_versions() {
+        let options = create_test_options();
+        let client = FlagKitClient::new(options).unwrap();
+
+        let response = InitResponse {
+            flags: vec![],
+            server_time: None,
+            environment: None,
+            environment_id: None,
+            polling_interval_seconds: None,
+            metadata: Some(InitMetadata {
+                sdk_version_min: Some("0.5.0".to_string()),
+                sdk_version_recommended: Some("0.9.0".to_string()),
+                sdk_version_latest: Some("2.0.0".to_string()),
+                deprecation_warning: None,
+                features: InitMetadataFeatures::default(),
+            }),
+        };
+
+        // This should log various messages but not panic
+        client.check_version_metadata(&response);
     }
 }
