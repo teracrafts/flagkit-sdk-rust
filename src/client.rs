@@ -22,7 +22,7 @@ use crate::types::{EvaluationContext, EvaluationReason, EvaluationResult, FlagSt
 use crate::utils::is_version_less_than;
 
 /// The current SDK version, matching Cargo.toml
-pub const SDK_VERSION: &str = "1.0.0";
+pub const SDK_VERSION: &str = "1.0.1";
 
 /// SDK feature flags metadata from the server.
 #[allow(dead_code)]
