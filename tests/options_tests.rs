@@ -18,7 +18,6 @@ fn test_default_values() {
     assert_eq!(options.circuit_breaker_threshold, 5);
     assert_eq!(options.circuit_breaker_reset_timeout, Duration::from_secs(30));
     assert!(options.bootstrap.is_none());
-    assert!(options.local_port.is_none());
 }
 
 #[test]
@@ -35,7 +34,6 @@ fn test_builder_custom_values() {
         .retry_attempts(5)
         .circuit_breaker_threshold(10)
         .circuit_breaker_reset_timeout(Duration::from_secs(60))
-        .local_port(8200)
         .build();
 
     assert_eq!(options.polling_interval, Duration::from_secs(60));
@@ -49,35 +47,6 @@ fn test_builder_custom_values() {
     assert_eq!(options.retry_attempts, 5);
     assert_eq!(options.circuit_breaker_threshold, 10);
     assert_eq!(options.circuit_breaker_reset_timeout, Duration::from_secs(60));
-    assert_eq!(options.local_port, Some(8200));
-}
-
-#[test]
-fn test_local_port_none_by_default() {
-    let options = FlagKitOptions::new("sdk_test_key");
-    assert!(options.local_port.is_none());
-}
-
-#[test]
-fn test_local_port_builder_defaults_to_none() {
-    let options = FlagKitOptions::builder("sdk_test_key").build();
-    assert!(options.local_port.is_none());
-}
-
-#[test]
-fn test_local_port_can_be_set() {
-    let options = FlagKitOptions::builder("sdk_test_key")
-        .local_port(8200)
-        .build();
-    assert_eq!(options.local_port, Some(8200));
-}
-
-#[test]
-fn test_local_port_custom_value() {
-    let options = FlagKitOptions::builder("sdk_test_key")
-        .local_port(3000)
-        .build();
-    assert_eq!(options.local_port, Some(3000));
 }
 
 #[test]
@@ -164,14 +133,12 @@ fn test_builder_with_bootstrap() {
 fn test_options_clone() {
     let options = FlagKitOptions::builder("sdk_test_key")
         .polling_interval(Duration::from_secs(60))
-        .local_port(8200)
         .build();
 
     let cloned = options.clone();
 
     assert_eq!(cloned.api_key, options.api_key);
     assert_eq!(cloned.polling_interval, options.polling_interval);
-    assert_eq!(cloned.local_port, options.local_port);
 }
 
 #[test]
