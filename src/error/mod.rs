@@ -96,7 +96,6 @@ pub enum ErrorCode {
     StreamingUnavailable,
 
     // Security errors
-    SecurityLocalPortInProduction,
     SecurityPiiDetected,
     SecuritySignatureError,
     SecurityKeyRotationFailed,
@@ -174,7 +173,6 @@ impl ErrorCode {
             ErrorCode::StreamingSubscriptionSuspended => "STREAMING_SUBSCRIPTION_SUSPENDED",
             ErrorCode::StreamingConnectionLimit => "STREAMING_CONNECTION_LIMIT",
             ErrorCode::StreamingUnavailable => "STREAMING_UNAVAILABLE",
-            ErrorCode::SecurityLocalPortInProduction => "SECURITY_LOCAL_PORT_IN_PRODUCTION",
             ErrorCode::SecurityPiiDetected => "SECURITY_PII_DETECTED",
             ErrorCode::SecuritySignatureError => "SECURITY_SIGNATURE_ERROR",
             ErrorCode::SecurityKeyRotationFailed => "SECURITY_KEY_ROTATION_FAILED",
