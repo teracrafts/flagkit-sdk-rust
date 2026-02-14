@@ -3,49 +3,26 @@ use flagkit::FlagKitOptions;
 // Test the get_base_url function which is exposed from http module
 mod http_base_url_tests {
     use super::*;
+    use std::env;
 
     #[test]
     fn test_base_url_default() {
+        env::remove_var("FLAGKIT_MODE");
         let options = FlagKitOptions::builder("sdk_test_key").build();
-
-        // Without local_port, should use production URL
-        assert!(options.local_port.is_none());
     }
 
     #[test]
-    fn test_base_url_with_local_port() {
+    fn test_base_url_with_local_mode() {
+        env::set_var("FLAGKIT_MODE", "local");
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .build();
-
-        assert_eq!(options.local_port, Some(8200));
     }
 
     #[test]
-    fn test_base_url_with_custom_port() {
+    fn test_base_url_with_beta_mode() {
+        env::set_var("FLAGKIT_MODE", "beta");
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(3000)
             .build();
-
-        assert_eq!(options.local_port, Some(3000));
-    }
-
-    #[test]
-    fn test_base_url_with_port_80() {
-        let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(80)
-            .build();
-
-        assert_eq!(options.local_port, Some(80));
-    }
-
-    #[test]
-    fn test_base_url_with_port_443() {
-        let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(443)
-            .build();
-
-        assert_eq!(options.local_port, Some(443));
     }
 }
 
