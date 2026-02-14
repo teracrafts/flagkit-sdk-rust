@@ -189,8 +189,8 @@ impl HttpClient {
             .client
             .get(&url)
             .header("X-API-Key", &self.options.api_key)
-            .header("User-Agent", "FlagKit-Rust/1.0.8")
-            .header("X-FlagKit-SDK-Version", "1.0.8")
+            .header("User-Agent", "FlagKit-Rust/1.0.9")
+            .header("X-FlagKit-SDK-Version", "1.0.9")
             .header("X-FlagKit-SDK-Language", "rust")
             .send()
             .await
@@ -215,8 +215,8 @@ impl HttpClient {
             .client
             .post(&url)
             .header("X-API-Key", &self.options.api_key)
-            .header("User-Agent", "FlagKit-Rust/1.0.8")
-            .header("X-FlagKit-SDK-Version", "1.0.8")
+            .header("User-Agent", "FlagKit-Rust/1.0.9")
+            .header("X-FlagKit-SDK-Version", "1.0.9")
             .header("X-FlagKit-SDK-Language", "rust")
             .header("Content-Type", "application/json");
 
