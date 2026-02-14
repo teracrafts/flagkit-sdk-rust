@@ -58,3 +58,9 @@ All verifications passed!
 ## Note
 
 This lab is defined as an example in `Cargo.toml` and is not included in the published crate.
+
+## Mode Routing
+Use `FLAGKIT_MODE` to control API target during SDK Lab runs:
+- `local` -> `https://api.flagkit.on/api/v1`
+- `beta` -> `https://api.beta.flagkit.dev/api/v1`
+- `carbon` (default) -> `https://api.flagkit.dev/api/v1`
