@@ -1,5 +1,6 @@
 use reqwest::{Client, Response, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,6 +10,8 @@ use crate::error::{ErrorCode, FlagKitError, Result};
 use crate::security::sign_request;
 
 const DEFAULT_BASE_URL: &str = "https://api.flagkit.dev/api/v1";
+const BETA_BASE_URL: &str = "https://api.beta.flagkit.dev/api/v1";
+const LOCAL_BASE_URL: &str = "https://api.flagkit.on/api/v1";
 
 /// Subscription status values from the API
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,10 +103,11 @@ pub fn extract_usage_metrics(response: &Response) -> Option<UsageMetrics> {
     })
 }
 
-pub fn get_base_url(local_port: Option<u16>) -> String {
-    match local_port {
-        Some(port) => format!("http://localhost:{}/api/v1", port),
-        None => DEFAULT_BASE_URL.to_string(),
+pub fn get_base_url() -> String {
+    match env::var("FLAGKIT_MODE").unwrap_or_default().trim().to_lowercase().as_ref() {
+        "local" => LOCAL_BASE_URL.to_string(),
+        "beta" => BETA_BASE_URL.to_string(),
+        _ => DEFAULT_BASE_URL.to_string(),
     }
 }
 
@@ -123,6 +127,7 @@ pub struct HttpClient {
     client: Client,
     circuit_breaker: Arc<CircuitBreaker>,
     options: FlagKitOptions,
+    resolved_base_url: String,
     on_usage_update: Option<UsageUpdateCallback>,
 }
 
@@ -152,6 +157,7 @@ impl HttpClient {
         Ok(Self {
             client,
             circuit_breaker,
+            resolved_base_url: get_base_url(),
             options,
             on_usage_update,
         })
@@ -162,8 +168,8 @@ impl HttpClient {
         self.on_usage_update = Some(callback);
     }
 
-    fn base_url(&self) -> String {
-        get_base_url(self.options.local_port)
+    fn base_url(&self) -> &str {
+        &self.resolved_base_url
     }
 
     pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -371,30 +377,36 @@ impl HttpClient {
 mod tests {
     use super::*;
 
+    // All FLAGKIT_MODE tests consolidated into one test to avoid env var races
+    // (Rust runs tests in parallel within a single process)
     #[test]
-    fn test_base_url_default() {
-        let options = FlagKitOptions::builder("sdk_test_key").build();
-        let client = HttpClient::new(options).unwrap();
+    fn test_base_url_mode_routing() {
+        // Default (no mode set)
+        env::remove_var("FLAGKIT_MODE");
+        assert_eq!(get_base_url(), DEFAULT_BASE_URL);
+        let client = HttpClient::new(FlagKitOptions::builder("sdk_test_key").build()).unwrap();
         assert_eq!(client.base_url(), DEFAULT_BASE_URL);
-    }
 
-    #[test]
-    fn test_base_url_with_local_port() {
-        let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
-            .build();
-        let client = HttpClient::new(options).unwrap();
-        assert_eq!(client.base_url(), "http://localhost:8200/api/v1");
-    }
+        // Local mode
+        env::set_var("FLAGKIT_MODE", "local");
+        assert_eq!(get_base_url(), LOCAL_BASE_URL);
+        let client = HttpClient::new(FlagKitOptions::builder("sdk_test_key").build()).unwrap();
+        assert_eq!(client.base_url(), LOCAL_BASE_URL);
 
-    #[test]
-    fn test_get_base_url_none() {
-        assert_eq!(get_base_url(None), DEFAULT_BASE_URL);
-    }
+        // Beta mode
+        env::set_var("FLAGKIT_MODE", "beta");
+        assert_eq!(get_base_url(), BETA_BASE_URL);
 
-    #[test]
-    fn test_get_base_url_with_port() {
-        assert_eq!(get_base_url(Some(3000)), "http://localhost:3000/api/v1");
+        // Trims whitespace
+        env::set_var("FLAGKIT_MODE", " local ");
+        assert_eq!(get_base_url(), LOCAL_BASE_URL);
+
+        // Unknown mode falls through to production
+        env::set_var("FLAGKIT_MODE", "staging");
+        assert_eq!(get_base_url(), DEFAULT_BASE_URL);
+
+        // Cleanup
+        env::remove_var("FLAGKIT_MODE");
     }
 
     // === Usage Metrics Tests ===
