@@ -3,7 +3,6 @@
 //! This module provides comprehensive security features including:
 //! - PII detection and warnings
 //! - Request signing with HMAC-SHA256
-//! - Local port restriction in production
 //! - API key rotation with automatic failover
 //! - Strict PII mode enforcement
 //! - Cache encryption using AES-256-GCM
@@ -719,41 +718,6 @@ pub fn is_production_environment() -> bool {
     let app_env = env::var("APP_ENV").unwrap_or_default();
 
     rust_env.eq_ignore_ascii_case("production") || app_env.eq_ignore_ascii_case("production")
-}
-
-/// Validate local port usage
-///
-/// Returns a SecurityError if local_port is used when in production environment.
-///
-/// # Arguments
-///
-/// * `local_port` - Optional local port configuration
-///
-/// # Returns
-///
-/// * `Ok(())` - Local port is not configured or not in production
-/// * `Err(FlagKitError)` - Local port is configured in production environment
-///
-/// # Examples
-///
-/// ```no_run
-/// use flagkit::security::validate_local_port;
-///
-/// // In non-production, this is OK
-/// validate_local_port(Some(8200)).unwrap();
-///
-/// // In production (RUST_ENV=production), this would return an error
-/// // validate_local_port(Some(8200)).unwrap_err();
-/// ```
-pub fn validate_local_port(local_port: Option<u16>) -> Result<()> {
-    if local_port.is_some() && is_production_environment() {
-        return Err(FlagKitError::new(
-            ErrorCode::SecurityLocalPortInProduction,
-            "Local port cannot be used in production environment. \
-             Set RUST_ENV or APP_ENV to a non-production value or remove local_port configuration.",
-        ));
-    }
-    Ok(())
 }
 
 // =============================================================================
@@ -1839,29 +1803,6 @@ mod tests {
         let result = check_pii_strict(None, DataType::Context, &config);
         assert!(result.is_ok());
     }
-
-    // =============================================================================
-    // Local Port Restriction Tests
-    // =============================================================================
-
-    #[test]
-    fn test_validate_local_port_none() {
-        let result = validate_local_port(None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_validate_local_port_non_production() {
-        // This test assumes RUST_ENV and APP_ENV are not set to "production"
-        // In actual testing, we would need to control the environment
-        env::remove_var("RUST_ENV");
-        env::remove_var("APP_ENV");
-
-        let result = validate_local_port(Some(8200));
-        assert!(result.is_ok());
-    }
-
-    // Note: Cannot easily test production mode without affecting other tests
 
     // =============================================================================
     // Request Signing Tests
