@@ -901,7 +901,6 @@ mod tests {
 
     fn create_test_options() -> FlagKitOptions {
         FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .build()
     }
 
@@ -962,7 +961,6 @@ mod tests {
         bootstrap.insert("test-flag".to_string(), serde_json::json!(true));
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap(bootstrap)
             .build();
         let client = FlagKitClient::new(options).unwrap();
@@ -982,7 +980,6 @@ mod tests {
         bootstrap.insert("flag-3".to_string(), serde_json::json!(42));
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap(bootstrap)
             .build();
         let client = FlagKitClient::new(options).unwrap();
@@ -1001,7 +998,6 @@ mod tests {
         bootstrap.insert("flag-b".to_string(), serde_json::json!(false));
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap(bootstrap)
             .build();
         let client = FlagKitClient::new(options).unwrap();
@@ -1039,7 +1035,6 @@ mod tests {
         bootstrap.insert("test-flag".to_string(), serde_json::json!(true));
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap(bootstrap)
             .build();
 
@@ -1077,7 +1072,6 @@ mod tests {
         };
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap(bootstrap)
             .evaluation_jitter(jitter_config)
             .build();
@@ -1114,7 +1108,6 @@ mod tests {
         };
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap(bootstrap)
             .evaluation_jitter(jitter_config)
             .build();
@@ -1148,7 +1141,6 @@ mod tests {
     #[test]
     fn test_enable_evaluation_jitter_builder() {
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .enable_evaluation_jitter()
             .build();
 
@@ -1175,7 +1167,6 @@ mod tests {
         let bootstrap_config = BootstrapConfig::with_signature(flags, signature, timestamp);
 
         let options = FlagKitOptions::builder(api_key)
-            .local_port(8200)
             .bootstrap_config(bootstrap_config)
             .build();
 
@@ -1205,7 +1196,6 @@ mod tests {
         let verification_config = BootstrapVerificationConfig::strict();
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap_config(bootstrap_config)
             .bootstrap_verification(verification_config)
             .build();
@@ -1240,7 +1230,6 @@ mod tests {
         assert_eq!(verification_config.on_failure, "warn");
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap_config(bootstrap_config)
             .bootstrap_verification(verification_config)
             .build();
@@ -1271,7 +1260,6 @@ mod tests {
         let verification_config = BootstrapVerificationConfig::strict();
 
         let options = FlagKitOptions::builder(api_key)
-            .local_port(8200)
             .bootstrap_config(bootstrap_config)
             .bootstrap_verification(verification_config)
             .build();
@@ -1291,7 +1279,6 @@ mod tests {
         let bootstrap_config = BootstrapConfig::new(flags);
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap_config(bootstrap_config)
             .build();
 
@@ -1319,7 +1306,6 @@ mod tests {
         assert!(!verification_config.enabled);
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap_config(bootstrap_config)
             .bootstrap_verification(verification_config)
             .build();
@@ -1343,7 +1329,6 @@ mod tests {
         let signature = sign_bootstrap(&flags, api_key, timestamp).unwrap();
 
         let options = FlagKitOptions::builder(api_key)
-            .local_port(8200)
             .bootstrap_with_signature(flags, signature, timestamp)
             .build();
 
@@ -1364,7 +1349,6 @@ mod tests {
         let bootstrap_config = BootstrapConfig::new(config_flags);
 
         let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
             .bootstrap(legacy_flags) // This should be ignored
             .bootstrap_config(bootstrap_config) // This should take precedence
             .build();
