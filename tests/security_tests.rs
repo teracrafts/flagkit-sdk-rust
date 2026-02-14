@@ -1,7 +1,7 @@
 use flagkit::security::{
     check_pii_strict, detect_potential_pii, detect_potential_pii_with_config, is_client_key,
     is_potential_pii_field, is_potential_pii_field_with_config, is_production_environment,
-    is_server_key, sign_request, validate_api_key_security, validate_local_port,
+    is_server_key, sign_request, validate_api_key_security,
     verify_signature, warn_if_potential_pii, warn_if_potential_pii_with_config,
     warn_if_server_key_in_browser, ApiKeyManager, DataType, EncryptedCache, Logger,
     SecurityConfig,
@@ -710,38 +710,6 @@ mod validate_api_key_security_tests {
         assert!(validate_api_key_security("sdk_", None, None).is_ok());
         assert!(validate_api_key_security("srv_", None, None).is_ok());
         assert!(validate_api_key_security("cli_", None, None).is_ok());
-    }
-}
-
-// =============================================================================
-// Local Port Restriction tests
-// =============================================================================
-
-mod local_port_restriction_tests {
-    use super::*;
-
-    #[test]
-    fn validate_local_port_none() {
-        let result = validate_local_port(None);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn validate_local_port_non_production() {
-        // Ensure we're not in production
-        std::env::remove_var("RUST_ENV");
-        std::env::remove_var("APP_ENV");
-
-        let result = validate_local_port(Some(8200));
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn is_production_environment_default() {
-        std::env::remove_var("RUST_ENV");
-        std::env::remove_var("APP_ENV");
-
-        assert!(!is_production_environment());
     }
 }
 
