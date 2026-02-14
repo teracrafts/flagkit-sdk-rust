@@ -178,7 +178,6 @@ pub struct FlagKitOptions {
     pub bootstrap: Option<HashMap<String, serde_json::Value>>,
     /// Bootstrap configuration with optional signature for verification.
     pub bootstrap_config: Option<BootstrapConfig>,
-    pub local_port: Option<u16>,
     /// Enable crash-resilient event persistence.
     pub persist_events: bool,
     /// Directory path for event storage.
@@ -214,7 +213,6 @@ impl FlagKitOptions {
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
             bootstrap_config: None,
-            local_port: None,
             persist_events: false,
             event_storage_path: None,
             max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
@@ -279,7 +277,6 @@ pub struct FlagKitOptionsBuilder {
     circuit_breaker_reset_timeout: Duration,
     bootstrap: Option<HashMap<String, serde_json::Value>>,
     bootstrap_config: Option<BootstrapConfig>,
-    local_port: Option<u16>,
     persist_events: bool,
     event_storage_path: Option<PathBuf>,
     max_persisted_events: usize,
@@ -307,7 +304,6 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_reset_timeout: DEFAULT_CIRCUIT_BREAKER_RESET_TIMEOUT,
             bootstrap: None,
             bootstrap_config: None,
-            local_port: None,
             persist_events: false,
             event_storage_path: None,
             max_persisted_events: DEFAULT_MAX_PERSISTED_EVENTS,
@@ -401,12 +397,6 @@ impl FlagKitOptionsBuilder {
         self.bootstrap_verification = config;
         self
     }
-
-    pub fn local_port(mut self, port: u16) -> Self {
-        self.local_port = Some(port);
-        self
-    }
-
     /// Enable crash-resilient event persistence.
     pub fn persist_events(mut self, enabled: bool) -> Self {
         self.persist_events = enabled;
@@ -483,7 +473,6 @@ impl FlagKitOptionsBuilder {
             circuit_breaker_reset_timeout: self.circuit_breaker_reset_timeout,
             bootstrap: self.bootstrap,
             bootstrap_config: self.bootstrap_config,
-            local_port: self.local_port,
             persist_events: self.persist_events,
             event_storage_path: self.event_storage_path,
             max_persisted_events: self.max_persisted_events,
@@ -499,26 +488,6 @@ impl FlagKitOptionsBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_local_port_defaults_to_none() {
-        let options = FlagKitOptions::new("sdk_test_key");
-        assert!(options.local_port.is_none());
-    }
-
-    #[test]
-    fn test_local_port_builder_defaults_to_none() {
-        let options = FlagKitOptions::builder("sdk_test_key").build();
-        assert!(options.local_port.is_none());
-    }
-
-    #[test]
-    fn test_local_port_can_be_set() {
-        let options = FlagKitOptions::builder("sdk_test_key")
-            .local_port(8200)
-            .build();
-        assert_eq!(options.local_port, Some(8200));
-    }
 
     // === Evaluation Jitter Config Tests ===
 
