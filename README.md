@@ -269,15 +269,12 @@ for handle in handles {
 | `timeout` | 10s | HTTP timeout |
 | `retry_attempts` | 3 | Max retry attempts |
 | `bootstrap` | None | Initial flag data |
-| `local_port` | None | Local development server port (uses `http://localhost:{port}/api/v1`) |
 
 ## Local Development
 
-When running FlagKit locally, use the `local_port` option to connect to the local development server:
 
 ```rust
 let options = FlagKitOptions::builder("sdk_your_api_key")
-    .local_port(8200)  // Uses http://localhost:8200/api/v1
     .build();
 
 FlagKit::initialize(options)?;
